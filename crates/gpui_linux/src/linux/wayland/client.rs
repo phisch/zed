@@ -57,7 +57,9 @@ use wayland_protocols::xdg::activation::v1::client::{xdg_activation_token_v1, xd
 use wayland_protocols::xdg::decoration::zv1::client::{
     zxdg_decoration_manager_v1, zxdg_toplevel_decoration_v1,
 };
-use wayland_protocols::xdg::shell::client::{xdg_surface, xdg_toplevel, xdg_wm_base};
+use wayland_protocols::xdg::shell::client::{
+    xdg_popup, xdg_positioner, xdg_surface, xdg_toplevel, xdg_wm_base,
+};
 use wayland_protocols::xdg::system_bell::v1::client::xdg_system_bell_v1;
 use wayland_protocols::{
     wp::cursor_shape::v1::client::{wp_cursor_shape_device_v1, wp_cursor_shape_manager_v1},
@@ -336,6 +338,18 @@ impl WaylandClientStatePtr {
 
     pub fn get_serial(&self, kind: SerialKind) -> u32 {
         self.0.upgrade().unwrap().borrow().serial_tracker.get(kind)
+    }
+
+    // A popup grab must reference a press event or the compositor declines it, so return the most
+    // recent mouse- or key-press serial.
+    pub fn popup_grab_serial_and_seat(&self) -> Option<(u32, wl_seat::WlSeat)> {
+        let client = self.0.upgrade()?;
+        let state = client.borrow();
+        let serial = state
+            .serial_tracker
+            .get(SerialKind::MousePress)
+            .max(state.serial_tracker.get(SerialKind::KeyPress));
+        Some((serial, state.wl_seat.clone()))
     }
 
     pub fn set_pending_activation(&self, window: ObjectId) {
@@ -846,7 +860,13 @@ impl LinuxClient for WaylandClient {
     ) -> anyhow::Result<Box<dyn PlatformWindow>> {
         let mut state = self.0.borrow_mut();
 
-        let parent = state.keyboard_focused_window.clone();
+        // Layer-shell surfaces such as panels can request `KeyboardInteractivity::None`
+        // and so are never keyboard-focused, yet a popup (e.g. a menu) opened from a
+        // click on the panel still needs to anchor to it.
+        let parent = state
+            .keyboard_focused_window
+            .clone()
+            .or_else(|| state.mouse_focused_window.clone());
 
         let target_output = params.display_id.and_then(|display_id| {
             let target_protocol_id: u64 = display_id.into();
@@ -859,17 +879,26 @@ impl LinuxClient for WaylandClient {
 
         let appearance = state.common.appearance;
         let compositor_gpu = state.compositor_gpu.take();
+        let globals = state.globals.clone();
+        let gpu_context = state.gpu_context.clone();
+        let client = WaylandClientStatePtr(Rc::downgrade(&self.0));
+
+        // We need to drop the borrow before creating the window to avoid deadlock
+        drop(state);
+
         let (window, surface_id) = WaylandWindow::new(
             handle,
-            state.globals.clone(),
-            state.gpu_context.clone(),
+            globals,
+            gpu_context,
             compositor_gpu,
-            WaylandClientStatePtr(Rc::downgrade(&self.0)),
+            client,
             params,
             appearance,
             parent,
             target_output,
         )?;
+
+        let mut state = self.0.borrow_mut();
         if window.0.toplevel().is_some() {
             state.consume_startup_activation_token(&window.0.surface());
         }
@@ -1196,6 +1225,7 @@ delegate_noop!(WaylandClientStatePtr: ignore wl_region::WlRegion);
 delegate_noop!(WaylandClientStatePtr: ignore wp_fractional_scale_manager_v1::WpFractionalScaleManagerV1);
 delegate_noop!(WaylandClientStatePtr: ignore zxdg_decoration_manager_v1::ZxdgDecorationManagerV1);
 delegate_noop!(WaylandClientStatePtr: ignore zwlr_layer_shell_v1::ZwlrLayerShellV1);
+delegate_noop!(WaylandClientStatePtr: ignore xdg_positioner::XdgPositioner);
 delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur_manager::OrgKdeKwinBlurManager);
 delegate_noop!(WaylandClientStatePtr: ignore zwp_text_input_manager_v3::ZwpTextInputManagerV3);
 delegate_noop!(WaylandClientStatePtr: ignore org_kde_kwin_blur::OrgKdeKwinBlur);
@@ -1358,6 +1388,31 @@ impl Dispatch<zwlr_layer_surface_v1::ZwlrLayerSurfaceV1, ObjectId> for WaylandCl
 
         drop(state);
         let should_close = window.handle_layersurface_event(event);
+
+        if should_close {
+            // Close logic will be handled in drop_window()
+            window.close();
+        }
+    }
+}
+
+impl Dispatch<xdg_popup::XdgPopup, ObjectId> for WaylandClientStatePtr {
+    fn event(
+        this: &mut Self,
+        _: &xdg_popup::XdgPopup,
+        event: <xdg_popup::XdgPopup as Proxy>::Event,
+        surface_id: &ObjectId,
+        _: &Connection,
+        _: &QueueHandle<Self>,
+    ) {
+        let client = this.get_client();
+        let mut state = client.borrow_mut();
+        let Some(window) = get_window(&mut state, surface_id) else {
+            return;
+        };
+
+        drop(state);
+        let should_close = window.handle_popup_event(event);
 
         if should_close {
             // The close logic will be handled in drop_window()
@@ -1934,7 +1989,11 @@ impl Dispatch<wl_pointer::WlPointer, ()> for WaylandClientStatePtr {
                 state: WEnum::Value(button_state),
                 ..
             } => {
-                state.serial_tracker.update(SerialKind::MousePress, serial);
+                // Record presses only. A grab anchored to a release serial is silently declined, so
+                // a popup opened on click-release would never auto-dismiss.
+                if button_state == wl_pointer::ButtonState::Pressed {
+                    state.serial_tracker.update(SerialKind::MousePress, serial);
+                }
                 let button = linux_button_to_gpui(button);
                 let Some(button) = button else { return };
                 if state.mouse_focused_window.is_none() {

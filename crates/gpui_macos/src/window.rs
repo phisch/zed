@@ -792,7 +792,9 @@ impl MacWindow {
                 WindowKind::Normal => {
                     msg_send![WINDOW_CLASS, alloc]
                 }
-                WindowKind::PopUp => {
+                // `Popup` is rejected in `MacPlatform::open_window`; it is grouped with `PopUp` here
+                // only to keep the match exhaustive (a native popup would also be a panel).
+                WindowKind::PopUp | WindowKind::Popup(_) => {
                     style_mask |= NSWindowStyleMaskNonactivatingPanel;
                     msg_send![PANEL_CLASS, alloc]
                 }
@@ -983,7 +985,9 @@ impl MacWindow {
                         let _: () = msg_send![native_window, setTabbingIdentifier:nil];
                     }
                 }
-                WindowKind::PopUp => {
+                // `Popup` is rejected in `MacPlatform::open_window`; grouped with `PopUp` here only
+                // to keep the match exhaustive.
+                WindowKind::PopUp | WindowKind::Popup(_) => {
                     // Use a tracking area to allow receiving MouseMoved events even when
                     // the window or application aren't active, which is often the case
                     // e.g. for notification windows.

@@ -7,7 +7,7 @@ use gpui::{
     Pixels, PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow,
     Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, ScaledPixels, Scene, Size,
     Tiling, WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea,
-    WindowDecorations, WindowKind, WindowParams, px,
+    WindowDecorations, WindowKind, WindowParams, popup::PopupNotSupportedError, px,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig};
 
@@ -428,6 +428,16 @@ impl X11WindowState {
         supports_xinput_gestures: bool,
         is_bgr: bool,
     ) -> anyhow::Result<Self> {
+        // Native popups are not implemented on X11 yet, so callers fall back to gpui's in-window
+        // popovers. To implement: resolve `anchor_rect` (parent-content-relative) to screen
+        // coordinates, place `options.size` by `anchor`/`gravity`/`offset`, apply
+        // `constraint_adjustment` against the monitor work area, and open an override-redirect
+        // window like `WindowKind::PopUp`. For `grab`, hold an XGrabPointer and dismiss on outside
+        // clicks. The placement math is the same on every platform and could be shared.
+        if let WindowKind::Popup(_) = params.kind {
+            return Err(PopupNotSupportedError.into());
+        }
+
         let x_screen_index = params
             .display_id
             .map_or(x_main_screen_index, |did| u64::from(did) as usize);

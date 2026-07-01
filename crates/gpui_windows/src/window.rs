@@ -405,6 +405,16 @@ impl WindowsWindow {
         params: WindowParams,
         creation_info: WindowCreationInfo,
     ) -> Result<Self> {
+        // Native popups are not implemented on Windows yet, so callers fall back to gpui's in-window
+        // popovers. To implement: resolve `anchor_rect` (parent-content-relative) against the parent
+        // HWND's screen rect, place `options.size` by `anchor`/`gravity`/`offset`, clamp to the
+        // monitor work area per `constraint_adjustment`, and create a WS_POPUP window like
+        // `WindowKind::PopUp`. For `grab`, use SetCapture and dismiss on outside clicks or
+        // WM_KILLFOCUS.
+        if let WindowKind::Popup(_) = params.kind {
+            return Err(popup::PopupNotSupportedError.into());
+        }
+
         let WindowCreationInfo {
             icon,
             executor,
