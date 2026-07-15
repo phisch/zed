@@ -202,7 +202,7 @@ let
         (darwinMinVersionHook "10.15")
       ];
 
-      cargoExtraArgs = "-p zed -p cli --locked --features=gpui_platform/runtime_shaders";
+      cargoExtraArgs = "-p zed -p cli --locked";
 
       stdenv =
         pkgs:

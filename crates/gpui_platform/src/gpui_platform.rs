@@ -59,19 +59,41 @@ pub fn current_platform(headless: bool) -> Rc<dyn Platform> {
     }
 }
 
-/// Returns a new [`HeadlessRenderer`] for the current platform, if available.
+/// Returns a new Vello headless renderer for the current native platform, if available.
 #[cfg(feature = "test-support")]
 pub fn current_headless_renderer() -> Option<Box<dyn gpui::PlatformHeadlessRenderer>> {
-    #[cfg(target_os = "macos")]
+    #[cfg(not(target_family = "wasm"))]
     {
-        Some(Box::new(
-            gpui_macos::metal_renderer::MetalHeadlessRenderer::new(),
-        ))
+        match gpui_wgpu::VelloHeadlessRenderer::new() {
+            Ok(renderer) => Some(Box::new(renderer)),
+            Err(error) => {
+                log::error!("failed to initialize Vello headless renderer: {error:#}");
+                None
+            }
+        }
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_family = "wasm")]
     {
         None
+    }
+}
+
+#[cfg(all(test, feature = "test-support", not(target_family = "wasm")))]
+mod headless_renderer_tests {
+    use super::*;
+    use gpui::{DevicePixels, Scene, size};
+
+    #[test]
+    fn current_headless_renderer_produces_rgba_pixels() -> gpui::Result<()> {
+        let mut renderer = current_headless_renderer()
+            .ok_or_else(|| std::io::Error::other("Vello headless renderer was unavailable"))?;
+        let image = renderer
+            .render_scene_to_image(&Scene::default(), size(DevicePixels(3), DevicePixels(2)))?;
+
+        assert_eq!(image.dimensions(), (3, 2));
+        assert!(image.pixels().all(|pixel| pixel.0 == [0, 0, 0, 0]));
+        Ok(())
     }
 }
 

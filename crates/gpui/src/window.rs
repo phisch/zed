@@ -3,19 +3,17 @@ use crate::Inspector;
 use crate::{
     Action, AnyDrag, AnyElement, AnyImageCache, AnyTooltip, AnyView, App, AppContext, Arena, Asset,
     AsyncWindowContext, AvailableSpace, Background, BorderStyle, Bounds, BoxShadow, Capslock,
-    Context, Corners, CursorHideMode, CursorStyle, Decorations, DevicePixels,
-    DispatchActionListener, DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity,
-    EntityId, EventEmitter, FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs,
-    Hsla, InputHandler, IsZero, KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke,
-    KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent, MonochromeSprite,
-    MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels, PlatformAtlas,
-    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PolychromeSprite,
-    Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams, RenderImage,
-    RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
-    SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
-    StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
-    SystemWindowTabController, TabStopMap, TaffyLayoutEngine, Task, TextRenderingMode, TextStyle,
-    TextStyleRefinement, ThermalState, TransformationMatrix, Underline, UnderlineStyle,
+    Context, Corners, CursorHideMode, CursorStyle, Decorations, DispatchActionListener,
+    DispatchNodeId, DispatchTree, DisplayId, Edges, Effect, Entity, EntityId, EventEmitter,
+    FileDropEvent, FontId, Global, GlobalElementId, GlyphId, GpuSpecs, Hsla, InputHandler, IsZero,
+    KeyBinding, KeyContext, KeyDownEvent, KeyEvent, Keystroke, KeystrokeEvent, LayoutId,
+    LineLayoutIndex, Modifiers, ModifiersChangedEvent, MouseButton, MouseEvent, MouseMoveEvent,
+    MouseUpEvent, Path, Pixels, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, Priority, PromptButton, PromptLevel, Quad, Render, RenderImage, Replay,
+    ResizeEdge, ScaledPixels, Scene, Shadow, SharedString, Size, StrikethroughStyle, Style,
+    SubscriberSet, Subscription, SystemWindowTab, SystemWindowTabController, TabStopMap,
+    TaffyLayoutEngine, Task, TextStyle, TextStyleRefinement, ThermalState, TransformationMatrix,
+    Underline, UnderlineStyle, VectorGlyph, VectorGlyphRun, VectorImage, VectorSvg,
     WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControls, WindowDecorations,
     WindowOptions, WindowParams, WindowTextSystem, point, prelude::*, profiler, px, rems, size,
     transparent_black,
@@ -42,7 +40,6 @@ use slotmap::SlotMap;
 use smallvec::SmallVec;
 use std::{
     any::{Any, TypeId},
-    borrow::Cow,
     cell::{Cell, RefCell},
     cmp,
     fmt::{Debug, Display},
@@ -68,7 +65,7 @@ use self::a11y::A11y;
 #[cfg(not(target_family = "wasm"))]
 use self::a11y::ROOT_NODE_ID;
 use crate::util::{
-    atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel, round_half_toward_zero,
+    atomic_incr_if_not_zero, ceil_to_device_pixel, floor_to_device_pixel,
     round_half_toward_zero_f64, round_stroke_to_device_pixel, round_to_device_pixel,
 };
 pub use prompts::*;
@@ -992,9 +989,7 @@ pub struct Window {
     pub(crate) removed: bool,
     pub(crate) platform_window: Box<dyn PlatformWindow>,
     display_id: Option<DisplayId>,
-    sprite_atlas: Arc<dyn PlatformAtlas>,
     text_system: Arc<WindowTextSystem>,
-    text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
     /// The stack of override values for the window's rem size.
     ///
@@ -1343,7 +1338,6 @@ impl Window {
         }
 
         let display_id = platform_window.display().map(|display| display.id());
-        let sprite_atlas = platform_window.sprite_atlas();
         let mouse_position = platform_window.mouse_position();
         let modifiers = platform_window.modifiers();
         let capslock = platform_window.capslock();
@@ -1478,9 +1472,9 @@ impl Window {
                 // Throttle frame rate based on conditions:
                 // - Thermal pressure (Serious/Critical): cap to ~60fps
                 // - Inactive window (not focused): cap to ~30fps to save energy
-                let min_frame_interval = if !request_frame_options.force_render
-                    && !request_frame_options.require_presentation
-                    && next_frame_callbacks.borrow().is_empty()
+                let min_frame_interval = if request_frame_options.force_render
+                    || (!request_frame_options.require_presentation
+                        && next_frame_callbacks.borrow().is_empty())
                 {
                     None
                 } else if !active.get() {
@@ -1531,8 +1525,8 @@ impl Window {
                         handle
                             .update(&mut cx, |_, window, cx| {
                                 if request_frame_options.force_render {
-                                    // Bypass cached view reuse so we don't replay stale
-                                    // atlas tile references after a GPU device recovery.
+                                    // Bypass cached view reuse so the complete scene is
+                                    // rebuilt after renderer recovery.
                                     window.refresh();
                                 }
                                 let arena_clear_needed = window.draw(cx);
@@ -1707,9 +1701,7 @@ impl Window {
             removed: false,
             platform_window,
             display_id,
-            sprite_atlas,
             text_system,
-            text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
             rem_size_override_stack: SmallVec::new(),
             viewport_size: content_size,
@@ -3707,7 +3699,7 @@ impl Window {
         if !clipped_bounds.is_empty() {
             self.next_frame
                 .scene
-                .push_layer(self.cover_bounds(clipped_bounds));
+                .push_layer(scale_layer_bounds(clipped_bounds, self.scale_factor()));
         }
 
         let result = f(self);
@@ -3751,8 +3743,7 @@ impl Window {
                 color: shadow.color.opacity(opacity),
                 element_bounds,
                 element_corner_radii,
-                inset: 0,
-                pad: 0,
+                inset: false,
             });
         }
     }
@@ -3778,8 +3769,7 @@ impl Window {
                 continue;
             }
             let hole = (bounds + shadow.offset).dilate(-shadow.spread_radius);
-            // Clamp at zero so a large spread can't produce negative radii, which would
-            // break the SDF in the shader.
+            // Clamp at zero so a large spread cannot produce invalid rounded-rectangle radii.
             let zero = Pixels::ZERO;
             let hole_corner_radii = Corners {
                 top_left: (corner_radii.top_left - shadow.spread_radius).max(zero),
@@ -3796,8 +3786,7 @@ impl Window {
                 color: shadow.color.opacity(opacity),
                 element_bounds,
                 element_corner_radii,
-                inset: 1,
-                pad: 0,
+                inset: true,
             });
         }
     }
@@ -3872,12 +3861,11 @@ impl Window {
 
         self.next_frame.scene.insert_primitive(Underline {
             order: 0,
-            pad: 0,
             bounds,
             content_mask: self.snapped_content_mask(),
             color: style.color.unwrap_or_default().opacity(element_opacity),
             thickness,
-            wavy: style.wavy.into(),
+            wavy: style.wavy,
         });
     }
 
@@ -3902,12 +3890,11 @@ impl Window {
 
         self.next_frame.scene.insert_primitive(Underline {
             order: 0,
-            pad: 0,
             bounds,
             content_mask: self.snapped_content_mask(),
             thickness: self.snap_stroke(style.thickness),
             color: style.color.unwrap_or_default().opacity(opacity),
-            wavy: false.into(),
+            wavy: false,
         });
     }
 
@@ -3927,93 +3914,64 @@ impl Window {
         font_size: Pixels,
         color: Hsla,
     ) -> Result<()> {
-        self.invalidator.debug_assert_paint();
-
-        let element_opacity = self.element_opacity();
-        let scale_factor = self.scale_factor();
-        let glyph_origin = origin.scale(scale_factor);
-
-        let quantized_origin = Point::new(
-            round_half_toward_zero(glyph_origin.x.0 * SUBPIXEL_VARIANTS_X as f32)
-                / SUBPIXEL_VARIANTS_X as f32,
-            round_half_toward_zero(glyph_origin.y.0 * SUBPIXEL_VARIANTS_Y as f32)
-                / SUBPIXEL_VARIANTS_Y as f32,
-        );
-        let subpixel_variant = Point::new(
-            (quantized_origin.x.fract() * SUBPIXEL_VARIANTS_X as f32) as u8,
-            (quantized_origin.y.fract() * SUBPIXEL_VARIANTS_Y as f32) as u8,
-        );
-        let integer_origin = quantized_origin.map(|c| ScaledPixels(c.trunc()));
-        let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
-        let dilation = self.text_system().glyph_dilation_for_color(color);
-        let params = RenderGlyphParams {
-            font_id,
-            glyph_id,
-            font_size,
-            subpixel_variant,
-            scale_factor,
-            is_emoji: false,
-            subpixel_rendering,
-            dilation,
-        };
-
-        let raster_bounds = self.text_system().raster_bounds(&params)?;
-        if !raster_bounds.is_zero() {
-            let tile = self
-                .sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
-                    Ok(Some((size, Cow::Owned(bytes))))
-                })?
-                .expect("Callback above only errors or returns Some");
-            let bounds = Bounds {
-                origin: integer_origin + raster_bounds.origin.map(Into::into),
-                size: tile.bounds.size.map(Into::into),
-            };
-            let content_mask = self.snapped_content_mask();
-
-            if subpixel_rendering {
-                self.next_frame.scene.insert_primitive(SubpixelSprite {
-                    order: 0,
-                    pad: 0,
-                    bounds,
-                    content_mask,
-                    color: color.opacity(element_opacity),
-                    tile,
-                    transformation: TransformationMatrix::unit(),
-                });
-            } else {
-                self.next_frame.scene.insert_primitive(MonochromeSprite {
-                    order: 0,
-                    pad: 0,
-                    bounds,
-                    content_mask,
-                    color: color.opacity(element_opacity),
-                    tile,
-                    transformation: TransformationMatrix::unit(),
-                });
-            }
-        }
-        Ok(())
+        self.paint_glyphs(vec![(origin, glyph_id)], font_id, font_size, color)
     }
 
-    fn should_use_subpixel_rendering(&self, font_id: FontId, font_size: Pixels) -> bool {
-        if self.platform_window.background_appearance() != WindowBackgroundAppearance::Opaque {
-            return false;
+    pub(crate) fn paint_glyphs(
+        &mut self,
+        glyphs: Vec<(Point<Pixels>, GlyphId)>,
+        font_id: FontId,
+        font_size: Pixels,
+        color: Hsla,
+    ) -> Result<()> {
+        self.invalidator.debug_assert_paint();
+        if glyphs.is_empty() {
+            return Ok(());
         }
 
-        if !self.platform_window.is_subpixel_rendering_supported() {
-            return false;
-        }
-
-        let mode = match self.text_rendering_mode.get() {
-            TextRenderingMode::PlatformDefault => self
-                .text_system()
-                .recommended_rendering_mode(font_id, font_size),
-            mode => mode,
+        let Some(font) = self.text_system().font_render_data(font_id) else {
+            return Ok(());
+        };
+        let scale_factor = self.scale_factor();
+        let font_bounds = self
+            .text_system()
+            .bounding_box(font_id, font_size)
+            .scale(scale_factor);
+        let mut run_bounds: Option<Bounds<ScaledPixels>> = None;
+        let glyphs = glyphs
+            .into_iter()
+            .map(|(origin, id)| {
+                let position = origin.scale(scale_factor);
+                let bounds = Bounds {
+                    origin: point(
+                        position.x + font_bounds.origin.x,
+                        position.y - font_bounds.origin.y - font_bounds.size.height,
+                    ),
+                    size: font_bounds.size,
+                };
+                run_bounds = Some(
+                    run_bounds
+                        .map(|run_bounds| run_bounds.union(&bounds))
+                        .unwrap_or(bounds),
+                );
+                VectorGlyph { id, position }
+            })
+            .collect::<Vec<_>>();
+        let Some(bounds) = run_bounds else {
+            return Ok(());
         };
 
-        mode == TextRenderingMode::Subpixel
+        self.next_frame.scene.insert_primitive(VectorGlyphRun {
+            order: 0,
+            bounds,
+            content_mask: self.snapped_content_mask(),
+            color: color.opacity(self.element_opacity()),
+            font: font.font,
+            font_size: ScaledPixels(font_size.0 * scale_factor),
+            normalized_coords: font.normalized_coords,
+            glyphs: Arc::from(glyphs),
+        });
+        Ok(())
     }
 
     /// Paints an emoji glyph into the scene for the next frame at the current z-index.
@@ -4031,51 +3989,7 @@ impl Window {
         glyph_id: GlyphId,
         font_size: Pixels,
     ) -> Result<()> {
-        self.invalidator.debug_assert_paint();
-
-        let scale_factor = self.scale_factor();
-        let glyph_origin = origin.scale(scale_factor);
-        let integer_origin = glyph_origin.map(|c| ScaledPixels(round_half_toward_zero(c.0)));
-        let params = RenderGlyphParams {
-            font_id,
-            glyph_id,
-            font_size,
-            subpixel_variant: Default::default(),
-            scale_factor,
-            is_emoji: true,
-            subpixel_rendering: false,
-            dilation: 0,
-        };
-
-        let raster_bounds = self.text_system().raster_bounds(&params)?;
-        if !raster_bounds.is_zero() {
-            let tile = self
-                .sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
-                    Ok(Some((size, Cow::Owned(bytes))))
-                })?
-                .expect("Callback above only errors or returns Some");
-
-            let bounds = Bounds {
-                origin: integer_origin + raster_bounds.origin.map(Into::into),
-                size: tile.bounds.size.map(Into::into),
-            };
-            let content_mask = self.snapped_content_mask();
-            let opacity = self.element_opacity();
-
-            self.next_frame.scene.insert_primitive(PolychromeSprite {
-                order: 0,
-                pad: 0,
-                grayscale: false.into(),
-                bounds,
-                corner_radii: Default::default(),
-                content_mask,
-                tile,
-                opacity,
-            });
-        }
-        Ok(())
+        self.paint_glyphs(vec![(origin, glyph_id)], font_id, font_size, Hsla::white())
     }
 
     /// Paint a monochrome SVG into the scene for the next frame at the current stacking context.
@@ -4085,68 +3999,31 @@ impl Window {
         &mut self,
         bounds: Bounds<Pixels>,
         path: SharedString,
-        mut data: Option<&[u8]>,
+        data: Option<&[u8]>,
         transformation: TransformationMatrix,
         color: Hsla,
         cx: &App,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
-        let element_opacity = self.element_opacity();
-        let bounds = self.snap_bounds(bounds);
-
-        let params = RenderSvgParams {
-            path,
-            size: bounds.size.map(|pixels| {
-                DevicePixels::from((pixels.0 * SMOOTH_SVG_SCALE_FACTOR).ceil() as i32)
-            }),
-        };
-
-        let Some(tile) =
-            self.sprite_atlas
-                .get_or_insert_with(&params.clone().into(), &mut || {
-                    let Some((size, bytes)) = cx.svg_renderer.render_alpha_mask(&params, data)?
-                    else {
-                        return Ok(None);
-                    };
-                    Ok(Some((size, Cow::Owned(bytes))))
-                })?
-        else {
+        let Some(tree) = cx.svg_renderer.load_tree(&path, data)? else {
             return Ok(());
         };
-        let content_mask = self.snapped_content_mask();
-        let svg_bounds = Bounds {
-            origin: bounds.center()
-                - Point::new(
-                    ScaledPixels(tile.bounds.size.width.0 as f32 / SMOOTH_SVG_SCALE_FACTOR / 2.),
-                    ScaledPixels(tile.bounds.size.height.0 as f32 / SMOOTH_SVG_SCALE_FACTOR / 2.),
-                ),
-            size: tile
-                .bounds
-                .size
-                .map(|value| ScaledPixels(value.0 as f32 / SMOOTH_SVG_SCALE_FACTOR)),
-        };
-        let final_bounds = svg_bounds
-            .map_origin(|value| ScaledPixels(round_half_toward_zero(value.0)))
-            .map_size(|size| size.ceil());
-
-        self.next_frame.scene.insert_primitive(MonochromeSprite {
+        self.next_frame.scene.insert_primitive(VectorSvg {
             order: 0,
-            pad: 0,
-            bounds: final_bounds,
-            content_mask,
-            color: color.opacity(element_opacity),
-            tile,
+            bounds: self.snap_bounds(bounds),
+            content_mask: self.snapped_content_mask(),
+            tree,
+            color: color.opacity(self.element_opacity()),
             transformation,
         });
-
         Ok(())
     }
 
     /// Paint an image into the scene for the next frame at the current z-index.
-    /// This method will panic if the frame_index is not valid
     ///
-    /// This method should only be called as part of the paint phase of element drawing.
+    /// Returns an error if `frame_index` is not valid. This method should only be
+    /// called as part of the paint phase of element drawing.
     pub fn paint_image(
         &mut self,
         bounds: Bounds<Pixels>,
@@ -4156,37 +4033,26 @@ impl Window {
         grayscale: bool,
     ) -> Result<()> {
         self.invalidator.debug_assert_paint();
+        if frame_index >= data.frame_count() {
+            return Err(anyhow!(
+                "image frame index {frame_index} is out of bounds for {} frames",
+                data.frame_count()
+            ));
+        }
 
         let bounds = self.snap_bounds(bounds);
-        let params = RenderImageParams {
-            image_id: data.id,
-            frame_index,
-        };
-
-        let tile = self
-            .sprite_atlas
-            .get_or_insert_with(&params.into(), &mut || {
-                Ok(Some((
-                    data.size(frame_index),
-                    Cow::Borrowed(
-                        data.as_bytes(frame_index)
-                            .expect("It's the caller's job to pass a valid frame index"),
-                    ),
-                )))
-            })?
-            .expect("Callback above only returns Some");
         let content_mask = self.snapped_content_mask();
         let corner_radii = corner_radii.scale(self.scale_factor());
         let opacity = self.element_opacity();
 
-        self.next_frame.scene.insert_primitive(PolychromeSprite {
+        self.next_frame.scene.insert_primitive(VectorImage {
             order: 0,
-            pad: 0,
-            grayscale: grayscale.into(),
             bounds,
             content_mask,
             corner_radii,
-            tile,
+            image: data,
+            frame_index,
+            grayscale,
             opacity,
         });
         Ok(())
@@ -4209,20 +4075,6 @@ impl Window {
             content_mask,
             image_buffer,
         });
-    }
-
-    /// Removes an image from the sprite atlas.
-    pub fn drop_image(&mut self, data: Arc<RenderImage>) -> Result<()> {
-        for frame_index in 0..data.frame_count() {
-            let params = RenderImageParams {
-                image_id: data.id,
-                frame_index,
-            };
-
-            self.sprite_atlas.remove(&params.clone().into());
-        }
-
-        Ok(())
     }
 
     /// Add a node to the layout tree for the current frame. Takes the `Style` of the element for which
@@ -6291,6 +6143,13 @@ impl From<[u8; 20]> for ElementId {
     }
 }
 
+fn scale_layer_bounds(bounds: Bounds<Pixels>, scale_factor: f32) -> Bounds<ScaledPixels> {
+    Bounds {
+        origin: bounds.origin.scale(scale_factor),
+        size: bounds.size.scale(scale_factor),
+    }
+}
+
 /// A rectangle to be rendered in the window at the given position and size.
 /// Passed as an argument [`Window::paint_quad`].
 #[derive(Clone)]
@@ -6394,8 +6253,8 @@ pub fn outline(
 mod tests {
     use crate::{
         AppContext as _, Bounds, Context, FocusHandle, InteractiveElement as _, IntoElement,
-        ParentElement as _, Pixels, Render, Styled as _, TestAppContext, Window, canvas, div, px,
-        size,
+        ParentElement as _, Pixels, Render, Styled as _, TestAppContext, Window, canvas, div,
+        point, px, size,
     };
     use std::{cell::Cell, rc::Rc};
 
@@ -6420,6 +6279,21 @@ mod tests {
                 root
             }
         }
+    }
+
+    #[test]
+    fn scaled_adjacent_layers_remain_nonoverlapping() {
+        let first = super::scale_layer_bounds(
+            Bounds::new(point(px(0.0), px(1.0)), size(px(100.0), px(24.0))),
+            1.25,
+        );
+        let second = super::scale_layer_bounds(
+            Bounds::new(point(px(0.0), px(25.0)), size(px(100.0), px(24.0))),
+            1.25,
+        );
+
+        assert_eq!(first.bottom(), second.top());
+        assert!(!first.intersects(&second));
     }
 
     #[test]

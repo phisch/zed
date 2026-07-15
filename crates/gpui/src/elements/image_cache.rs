@@ -239,16 +239,7 @@ impl RetainAllImageCache {
     /// Create a new image cache.
     #[inline]
     pub fn new(cx: &mut App) -> Entity<Self> {
-        let e = cx.new(|_cx| RetainAllImageCache(HashMap::new()));
-        cx.observe_release(&e, |image_cache, cx| {
-            for (_, mut item) in std::mem::replace(&mut image_cache.0, HashMap::new()) {
-                if let Some(Ok(image)) = item.get() {
-                    cx.drop_image(image, None);
-                }
-            }
-        })
-        .detach();
-        e
+        cx.new(|_cx| RetainAllImageCache(HashMap::new()))
     }
 
     /// Load an image from the given source.
@@ -286,22 +277,13 @@ impl RetainAllImageCache {
     }
 
     /// Clear the image cache.
-    pub fn clear(&mut self, window: &mut Window, cx: &mut App) {
-        for (_, mut item) in std::mem::replace(&mut self.0, HashMap::new()) {
-            if let Some(Ok(image)) = item.get() {
-                cx.drop_image(image, Some(window));
-            }
-        }
+    pub fn clear(&mut self, _window: &mut Window, _cx: &mut App) {
+        self.0.clear();
     }
 
     /// Remove the image from the cache by the given source.
-    pub fn remove(&mut self, source: &Resource, window: &mut Window, cx: &mut App) {
-        let hash = hash(source);
-        if let Some(mut item) = self.0.remove(&hash)
-            && let Some(Ok(image)) = item.get()
-        {
-            cx.drop_image(image, Some(window));
-        }
+    pub fn remove(&mut self, source: &Resource, _window: &mut Window, _cx: &mut App) {
+        self.0.remove(&hash(source));
     }
 
     /// Returns the number of images in the cache.

@@ -28,15 +28,13 @@ use crate::{
 ///
 /// Text is shaped with the provided platform text system. Benchmarks generated
 /// by `#[gpui::bench]` use the current platform's text system, so text-heavy
-/// benchmark measurements include production shaping and glyph rasterization.
+/// benchmark measurements include production shaping.
 ///
 /// `headless_renderer_factory` supplies a renderer for benchmark windows, e.g.
-/// `gpui_platform::current_headless_renderer`. When present, scenes drawn by
-/// benchmarks are rasterized through the real sprite atlas and submitted to
-/// the GPU on present, so quad/sprite regressions show up in measurements.
-/// When `None`, presenting discards the scene. Currently only macOS provides
-/// a headless renderer (Metal), so GPU submission is excluded from benchmark
-/// measurements on other platforms.
+/// `gpui_platform::current_headless_renderer`. When present, complete retained
+/// scenes are rendered through WGPU/Vello and submitted to the GPU on present,
+/// so renderer regressions show up in measurements. When `None`, presenting
+/// discards the scene.
 pub fn bench_platform(
     headless_renderer_factory: Option<Box<dyn Fn() -> Option<Box<dyn PlatformHeadlessRenderer>>>>,
     text_system: Arc<dyn PlatformTextSystem>,

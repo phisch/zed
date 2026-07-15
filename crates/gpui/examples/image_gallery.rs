@@ -171,16 +171,7 @@ struct SimpleLruCache {
 }
 
 impl SimpleLruCache {
-    fn new(max_items: usize, cx: &mut Context<Self>) -> Self {
-        cx.on_release(|simple_cache, cx| {
-            for (_, mut item) in std::mem::take(&mut simple_cache.cache) {
-                if let Some(Ok(image)) = item.get() {
-                    cx.drop_image(image, None);
-                }
-            }
-        })
-        .detach();
-
+    fn new(max_items: usize, _cx: &mut Context<Self>) -> Self {
         Self {
             max_items,
             usages: Vec::with_capacity(max_items),
@@ -217,13 +208,9 @@ impl ImageCache for SimpleLruCache {
         let task = cx.background_executor().spawn(fut).shared();
         if self.usages.len() == self.max_items {
             let oldest = self.usages.pop().unwrap();
-            let mut image = self
-                .cache
+            self.cache
                 .remove(&oldest)
                 .expect("cache and usages must be in sync");
-            if let Some(Ok(image)) = image.get() {
-                cx.drop_image(image, Some(window));
-            }
         }
         self.cache
             .insert(hash, gpui::ImageCacheItem::Loading(task.clone()));

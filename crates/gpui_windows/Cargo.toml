@@ -13,7 +13,7 @@ path = "src/gpui_windows.rs"
 
 [features]
 default = ["gpui/default"]
-test-support = ["gpui/test-support"]
+test-support = ["gpui/test-support", "gpui_wgpu/test-support"]
 screen-capture = ["gpui/screen-capture", "scap"]
 
 [dependencies]
@@ -25,9 +25,9 @@ accesskit_windows.workspace = true
 anyhow.workspace = true
 collections.workspace = true
 dunce.workspace = true
-etagere = "0.2"
 futures.workspace = true
 gpui_util.workspace = true
+gpui_wgpu.workspace = true
 image.workspace = true
 itertools.workspace = true
 log.workspace = true
@@ -38,12 +38,8 @@ smallvec.workspace = true
 uuid.workspace = true
 windows.workspace = true
 windows-core.workspace = true
-windows-numerics = "0.2"
 windows-registry = "0.5"
 
 [target.'cfg(target_os = "windows")'.dependencies.scap]
 workspace = true
 optional = true
-
-[target.'cfg(target_os = "windows")'.build-dependencies]
-windows-registry = "0.5"

@@ -1237,28 +1237,6 @@ fn appearance_page() -> SettingsPage {
         ]
     }
 
-    fn text_rendering_section() -> [SettingsPageItem; 2] {
-        [
-            SettingsPageItem::SectionHeader("Text Rendering"),
-            SettingsPageItem::SettingItem(SettingItem {
-                title: "Text Rendering Mode",
-                description: "The text rendering mode to use.",
-                field: Box::new(SettingField {
-                    organization_override: None,
-                    json_path: Some("text_rendering_mode"),
-                    pick: |settings_content| {
-                        settings_content.workspace.text_rendering_mode.as_ref()
-                    },
-                    write: |settings_content, value, _| {
-                        settings_content.workspace.text_rendering_mode = value;
-                    },
-                }),
-                metadata: None,
-                files: USER,
-            }),
-        ]
-    }
-
     fn cursor_section() -> [SettingsPageItem; 6] {
         [
             SettingsPageItem::SectionHeader("Cursor"),
@@ -1480,7 +1458,6 @@ fn appearance_page() -> SettingsPage {
         ui_font_section(),
         agent_panel_font_section(),
         markdown_preview_font_section(),
-        text_rendering_section(),
         cursor_section(),
         highlighting_section(),
         guides_section(),

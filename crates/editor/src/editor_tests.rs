@@ -86,6 +86,29 @@ fn display_ranges(editor: &Editor, cx: &mut Context<'_, Editor>) -> Vec<Range<Di
 pub mod property_test;
 
 #[gpui::test]
+async fn test_zero_horizontal_scroll_keeps_first_column_inside_text_clip(cx: &mut TestAppContext) {
+    init_test(cx, |_| {});
+    let mut cx = EditorTestContext::new(cx).await;
+    cx.set_state("ˇfirst column");
+
+    let (scroll_left, gutter_margin, text_clip_left) = cx.update_editor(|editor, _, cx| {
+        let position_map = editor
+            .last_position_map
+            .as_ref()
+            .expect("editor should have rendered a position map");
+        (
+            editor.scroll_position(cx).x,
+            editor.gutter_dimensions.margin,
+            position_map.text_hitbox.bounds.left(),
+        )
+    });
+
+    assert_eq!(scroll_left, 0.0);
+    assert!(gutter_margin > Pixels::ZERO);
+    assert!(text_clip_left + gutter_margin > text_clip_left);
+}
+
+#[gpui::test]
 fn test_edit_events(cx: &mut TestAppContext) {
     init_test(cx, |_| {});
 

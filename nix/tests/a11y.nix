@@ -49,7 +49,7 @@ let
         version = "0.0.0";
         inherit src;
         cargoLock = ../../Cargo.lock;
-        cargoExtraArgs = "-p gpui --example a11y --locked --features=gpui_platform/runtime_shaders";
+        cargoExtraArgs = "-p gpui --example a11y --locked";
         CARGO_PROFILE = "dev";
 
         nativeBuildInputs = with pkgs; [

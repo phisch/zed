@@ -13,10 +13,9 @@ path = "src/gpui_macos.rs"
 
 [features]
 default = ["gpui/default"]
-test-support = ["gpui/test-support"]
-runtime_shaders = []
-font-kit = ["dep:font-kit"]
-screen-capture = ["gpui/screen-capture"]
+test-support = ["gpui/test-support", "gpui_wgpu/test-support"]
+
+screen-capture = ["gpui/screen-capture", "dep:media"]
 
 [dependencies]
 gpui.workspace = true
@@ -32,39 +31,32 @@ collections.workspace = true
 core-foundation.workspace = true
 core-foundation-sys.workspace = true
 core-graphics = "0.24"
-core-text = "21"
 core-video.workspace = true
 ctor.workspace = true
 derive_more.workspace = true
 dispatch2 = "0.3.1"
-etagere = "0.2"
-# WARNING: If you change this, you must also publish a new version of zed-font-kit to crates.io
-font-kit = { git = "https://github.com/zed-industries/font-kit", rev = "94b0f28166665e8fd2f53ff6d268a14955c82269", package = "zed-font-kit", version = "0.14.1-zed", optional = true }
 foreign-types = "0.5"
 futures.workspace = true
 gpui_util.workspace = true
+gpui_wgpu.workspace = true
 image.workspace = true
 itertools.workspace = true
 libc.workspace = true
 log.workspace = true
 mach2.workspace = true
-media.workspace = true
+media = { workspace = true, optional = true }
 metal.workspace = true
 objc.workspace = true
 objc2.workspace = true
 objc2-app-kit.workspace = true
 objc2-foundation.workspace = true
 parking_lot.workspace = true
-pathfinder_geometry = "0.5"
 raw-window-handle = "0.6"
 semver.workspace = true
 smallvec.workspace = true
 strum.workspace = true
 uuid.workspace = true
 
-[target.'cfg(target_os = "macos")'.build-dependencies]
-cbindgen = { version = "0.28.0", default-features = false }
-gpui.workspace = true
 
 # When this crate is itself being tested (cargo test -p gpui_macos), its own
 # cfg(test) flag enables impls of test-only traits like PlatformHeadlessRenderer

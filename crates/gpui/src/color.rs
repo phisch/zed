@@ -773,17 +773,15 @@ impl Display for ColorSpace {
     }
 }
 
-/// A background color, which can be either a solid color or a linear gradient.
+/// A solid, gradient, or patterned background.
 #[derive(Clone, Copy, PartialEq, Serialize, Deserialize, JsonSchema)]
-#[repr(C)]
 pub struct Background {
     pub(crate) tag: BackgroundTag,
     pub(crate) color_space: ColorSpace,
     pub(crate) solid: Hsla,
-    pub(crate) gradient_angle_or_pattern_height: f32,
+    pub(crate) primary_dimension: f32,
+    pub(crate) secondary_dimension: f32,
     pub(crate) colors: [LinearColorStop; 2],
-    /// Padding for alignment for repr(C) layout.
-    pad: u32,
 }
 
 impl std::fmt::Debug for Background {
@@ -793,17 +791,17 @@ impl std::fmt::Debug for Background {
             BackgroundTag::LinearGradient => write!(
                 f,
                 "LinearGradient({}, {:?}, {:?})",
-                self.gradient_angle_or_pattern_height, self.colors[0], self.colors[1]
+                self.primary_dimension, self.colors[0], self.colors[1]
             ),
             BackgroundTag::PatternSlash => write!(
                 f,
-                "PatternSlash({:?}, {})",
-                self.solid, self.gradient_angle_or_pattern_height
+                "PatternSlash({:?}, {}, {})",
+                self.solid, self.primary_dimension, self.secondary_dimension
             ),
             BackgroundTag::Checkerboard => write!(
                 f,
                 "Checkerboard({:?}, {})",
-                self.solid, self.gradient_angle_or_pattern_height
+                self.solid, self.primary_dimension
             ),
         }
     }
@@ -816,23 +814,20 @@ impl Default for Background {
             tag: BackgroundTag::Solid,
             solid: Hsla::default(),
             color_space: ColorSpace::default(),
-            gradient_angle_or_pattern_height: 0.0,
+            primary_dimension: 0.0,
+            secondary_dimension: 0.0,
             colors: [LinearColorStop::default(), LinearColorStop::default()],
-            pad: 0,
         }
     }
 }
 
 /// Creates a hash pattern background
 pub fn pattern_slash(color: impl Into<Hsla>, width: f32, interval: f32) -> Background {
-    let width_scaled = (width * 255.0) as u32;
-    let interval_scaled = (interval * 255.0) as u32;
-    let height = ((width_scaled * 0xFFFF) + interval_scaled) as f32;
-
     Background {
         tag: BackgroundTag::PatternSlash,
         solid: color.into(),
-        gradient_angle_or_pattern_height: height,
+        primary_dimension: width,
+        secondary_dimension: interval,
         ..Default::default()
     }
 }
@@ -842,7 +837,7 @@ pub fn checkerboard(color: impl Into<Hsla>, size: f32) -> Background {
     Background {
         tag: BackgroundTag::Checkerboard,
         solid: color.into(),
-        gradient_angle_or_pattern_height: size,
+        primary_dimension: size,
         ..Default::default()
     }
 }
@@ -869,7 +864,7 @@ pub fn linear_gradient(
 ) -> Background {
     Background {
         tag: BackgroundTag::LinearGradient,
-        gradient_angle_or_pattern_height: angle,
+        primary_dimension: angle,
         colors: [from.into(), to.into()],
         ..Default::default()
     }
@@ -907,7 +902,60 @@ impl LinearColorStop {
     }
 }
 
+/// Renderer-independent description of a [`Background`].
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum BackgroundContent {
+    /// A solid color.
+    Solid(Hsla),
+    /// A two-stop linear gradient.
+    LinearGradient {
+        /// CSS-compatible angle in degrees, where zero points upward.
+        angle: f32,
+        /// Gradient color stops.
+        stops: [LinearColorStop; 2],
+        /// Color space used to interpolate the stops.
+        color_space: ColorSpace,
+    },
+    /// A diagonal slash pattern.
+    PatternSlash {
+        /// Pattern color.
+        color: Hsla,
+        /// Width of each slash.
+        width: f32,
+        /// Space between adjacent slashes.
+        interval: f32,
+    },
+    /// A checkerboard pattern.
+    Checkerboard {
+        /// Checker color.
+        color: Hsla,
+        /// Size of each checker.
+        size: f32,
+    },
+}
+
 impl Background {
+    /// Returns a renderer-independent description of this background.
+    pub fn content(&self) -> BackgroundContent {
+        match self.tag {
+            BackgroundTag::Solid => BackgroundContent::Solid(self.solid),
+            BackgroundTag::LinearGradient => BackgroundContent::LinearGradient {
+                angle: self.primary_dimension,
+                stops: self.colors,
+                color_space: self.color_space,
+            },
+            BackgroundTag::PatternSlash => BackgroundContent::PatternSlash {
+                color: self.solid,
+                width: self.primary_dimension,
+                interval: self.secondary_dimension,
+            },
+            BackgroundTag::Checkerboard => BackgroundContent::Checkerboard {
+                color: self.solid,
+                size: self.primary_dimension,
+            },
+        }
+    }
+
     /// Returns the solid color if this is a solid background, None otherwise.
     pub fn as_solid(&self) -> Option<Hsla> {
         if self.tag == BackgroundTag::Solid {
@@ -1026,6 +1074,21 @@ mod tests {
         assert!(!background.is_transparent());
         background.solid = hsla(0.0, 0.0, 0.0, 0.0);
         assert!(background.is_transparent());
+    }
+
+    #[test]
+    fn test_background_pattern_slash_uses_semantic_dimensions() {
+        let color = Hsla::from(rgba(0xff0099ff));
+        let background = pattern_slash(color, 2.5, 7.25);
+
+        assert_eq!(
+            background.content(),
+            BackgroundContent::PatternSlash {
+                color,
+                width: 2.5,
+                interval: 7.25,
+            }
+        );
     }
 
     #[test]

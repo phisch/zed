@@ -32,13 +32,6 @@ impl AssetSource for () {
 #[derive(Copy, Clone, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct ImageId(pub usize);
 
-#[derive(PartialEq, Eq, Hash, Clone)]
-#[expect(missing_docs)]
-pub struct RenderImageParams {
-    pub image_id: ImageId,
-    pub frame_index: usize,
-}
-
 /// A cached and processed image, in BGRA format
 pub struct RenderImage {
     /// The ID associated with this image

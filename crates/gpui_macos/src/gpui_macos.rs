@@ -14,16 +14,9 @@ mod pasteboard;
 #[cfg(feature = "screen-capture")]
 mod screen_capture;
 
-mod metal_atlas;
-pub mod metal_renderer;
+mod vello_renderer;
 
-use metal_renderer as renderer;
-
-#[cfg(feature = "font-kit")]
-mod open_type;
-
-#[cfg(feature = "font-kit")]
-mod text_system;
+use vello_renderer as renderer;
 
 mod platform;
 mod window;
@@ -46,9 +39,6 @@ pub(crate) use display_link::*;
 pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
-
-#[cfg(feature = "font-kit")]
-pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 

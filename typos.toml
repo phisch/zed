@@ -43,9 +43,7 @@ extend-exclude = [
     "extensions/proto/extension.toml",
     "extensions/proto/src/language_servers/protols.rs",
     # Windows likes its abbreviations.
-    "crates/gpui_windows/src/directx_renderer.rs",
     "crates/gpui_windows/src/events.rs",
-    "crates/gpui_windows/src/direct_write.rs",
     "crates/gpui_windows/src/window.rs",
     # Some typos in the base mdBook CSS.
     "docs/theme/css/",

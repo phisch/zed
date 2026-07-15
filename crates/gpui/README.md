@@ -9,7 +9,7 @@ GPUI is still in active development as we work on the Zed code editor, and is st
 
 ```toml
 gpui = { version = "*" }
-gpui_platform = { version = "*", features = ["font-kit", "wayland", "x11"] }
+gpui_platform = { version = "*", features = ["wayland", "x11"] }
 ```
 
 Everything in a standalone GPUI app starts with an `Application`. You can create one with `gpui_platform::application()`, which picks the windowing and text backends for the host OS, and kick off your application by passing a callback to `Application::run()`. Inside this callback, you can create a new window with `App::open_window()` and register your first root view.
@@ -26,21 +26,15 @@ fn main() {
 
 ### `gpui_platform`
 
-The features on `gpui_platform` are platform-specific, so the list above is a safe cross-platform default. If you build for a single platform, you can trim it:
+The features on `gpui_platform` are platform-specific. Rendering uses the shared WGPU/Vello renderer and Parley text system on every desktop platform.
 
-- **macOS** — Rendering uses Metal and is always available, but glyph rasterization needs `font-kit`. Without it, GPUI falls back to a placeholder text system that lays text out but renders no glyphs.
+- **macOS and Windows** — no platform features are required.
 
-    ```toml
-    gpui_platform = { version = "*", features = ["font-kit"] }
-    ```
-
-- **Linux / FreeBSD** — enable at least one windowing backend for desktop windows: `wayland`, `x11`, or both. These features also compile the renderer and text system, so no separate text feature is needed.
+- **Linux / FreeBSD** — enable at least one windowing backend for desktop windows: `wayland`, `x11`, or both.
 
     ```toml
     gpui_platform = { version = "*", features = ["wayland", "x11"] }
     ```
-
-- **Windows** — no features are required. Windowing uses Win32 and text uses DirectWrite. `font-kit` has no effect here.
 
 ### Additional Topics
 
@@ -53,7 +47,7 @@ GPUI has various system dependencies that it needs in order to work.
 
 #### macOS
 
-On macOS, GPUI uses Metal for rendering. In order to use Metal, you need to do the following:
+On macOS, WGPU uses the system Metal API. To build GPUI, you need to do the following:
 
 - Install [Xcode](https://apps.apple.com/us/app/xcode/id497799835?mt=12) from the macOS App Store, or from the [Apple Developer](https://developer.apple.com/download/all/) website. Note this requires a developer account.
 

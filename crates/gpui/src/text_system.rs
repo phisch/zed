@@ -13,8 +13,8 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    Bounds, DevicePixels, Hsla, Pixels, PlatformTextSystem, Point, Result, SharedString, Size,
-    StrikethroughStyle, TextRenderingMode, UnderlineStyle, px,
+    Bounds, Hsla, Pixels, PlatformTextSystem, Result, SharedString, Size, StrikethroughStyle,
+    UnderlineStyle, px,
 };
 use anyhow::{Context as _, anyhow};
 use collections::FxHashMap;
@@ -41,18 +41,11 @@ pub struct FontId(pub usize);
 #[derive(Hash, PartialEq, Eq, Clone, Copy, Debug)]
 pub struct FontFamilyId(pub usize);
 
-/// Number of subpixel glyph variants along the X axis.
-pub const SUBPIXEL_VARIANTS_X: u8 = 4;
-
-/// Number of subpixel glyph variants along the Y axis.
-pub const SUBPIXEL_VARIANTS_Y: u8 = 1;
-
 /// The GPUI text rendering sub system.
 pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
     font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
-    raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
     font_runs_pool: Mutex<Vec<Vec<FontRun>>>,
     fallback_font_stack: SmallVec<[Font; 2]>,
@@ -64,7 +57,6 @@ impl TextSystem {
         TextSystem {
             platform_text_system,
             font_metrics: RwLock::default(),
-            raster_bounds: RwLock::default(),
             font_ids_by_font: RwLock::default(),
             wrapper_pool: Mutex::default(),
             font_runs_pool: Mutex::default(),
@@ -320,42 +312,8 @@ impl TextSystem {
         }
     }
 
-    /// Get the rasterized size and location of a specific, rendered glyph.
-    pub(crate) fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let raster_bounds = self.raster_bounds.upgradable_read();
-        if let Some(bounds) = raster_bounds.get(params) {
-            Ok(*bounds)
-        } else {
-            let mut raster_bounds = RwLockUpgradableReadGuard::upgrade(raster_bounds);
-            let bounds = self.platform_text_system.glyph_raster_bounds(params)?;
-            raster_bounds.insert(params.clone(), bounds);
-            Ok(bounds)
-        }
-    }
-
-    pub(crate) fn rasterize_glyph(
-        &self,
-        params: &RenderGlyphParams,
-    ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        let raster_bounds = self.raster_bounds(params)?;
-        self.platform_text_system
-            .rasterize_glyph(params, raster_bounds)
-    }
-
-    /// Returns the dilation level to use for a glyph painted in the given color.
-    pub(crate) fn glyph_dilation_for_color(&self, color: Hsla) -> u8 {
-        self.platform_text_system.glyph_dilation_for_color(color)
-    }
-
-    /// Returns the text rendering mode recommended by the platform for the given font and size.
-    /// The return value will never be [`TextRenderingMode::PlatformDefault`].
-    pub(crate) fn recommended_rendering_mode(
-        &self,
-        font_id: FontId,
-        font_size: Pixels,
-    ) -> TextRenderingMode {
-        self.platform_text_system
-            .recommended_rendering_mode(font_id, font_size)
+    pub(crate) fn font_render_data(&self, font_id: FontId) -> Option<FontRenderData> {
+        self.platform_text_system.font_render_data(font_id)
     }
 }
 
@@ -1013,37 +971,13 @@ impl TextRun {
 #[repr(C)]
 pub struct GlyphId(pub u32);
 
-/// Parameters for rendering a glyph, used as cache keys for raster bounds.
-///
-/// This struct identifies a specific glyph rendering configuration including
-/// font, size, subpixel positioning, and scale factor. It's used to look up
-/// cached raster bounds and sprite atlas entries.
+/// Renderer-independent data for drawing glyph outlines from a resolved font face.
 #[derive(Clone, Debug, PartialEq)]
-#[expect(missing_docs)]
-pub struct RenderGlyphParams {
-    pub font_id: FontId,
-    pub glyph_id: GlyphId,
-    pub font_size: Pixels,
-    pub subpixel_variant: Point<u8>,
-    pub scale_factor: f32,
-    pub is_emoji: bool,
-    pub subpixel_rendering: bool,
-    pub dilation: u8,
-}
-
-impl Eq for RenderGlyphParams {}
-
-impl Hash for RenderGlyphParams {
-    fn hash<H: Hasher>(&self, state: &mut H) {
-        self.font_id.0.hash(state);
-        self.glyph_id.0.hash(state);
-        self.font_size.0.to_bits().hash(state);
-        self.subpixel_variant.hash(state);
-        self.scale_factor.to_bits().hash(state);
-        self.is_emoji.hash(state);
-        self.subpixel_rendering.hash(state);
-        self.dilation.hash(state);
-    }
+pub struct FontRenderData {
+    /// The exact font resource and collection index used while shaping.
+    pub font: linebender_resource_handle::FontData,
+    /// Normalized variable-font coordinates in F2Dot14 representation.
+    pub normalized_coords: Arc<[i16]>,
 }
 
 /// The configuration details for identifying a specific font.

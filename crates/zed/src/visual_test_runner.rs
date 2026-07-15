@@ -6,13 +6,11 @@
 //! This binary runs visual regression tests for Zed's UI. It captures screenshots
 //! of real Zed windows and compares them against baseline images.
 //!
-//! **Note: This tool is macOS-only** because it uses `VisualTestAppContext` which
-//! depends on the macOS Metal renderer for accurate screenshot capture.
-//!
+
 //! ## How It Works
 //!
 //! This tool uses `VisualTestAppContext` which combines:
-//! - Real Metal/compositor rendering for accurate screenshots
+//! - Real WGPU/Vello rendering for accurate screenshots
 //! - Deterministic task scheduling via TestDispatcher
 //! - Controllable time via `advance_clock` for testing time-based behaviors
 //!

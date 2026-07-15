@@ -1,14 +1,15 @@
 use crate::{
-    AssetSource, DevicePixels, IsZero, RenderImage, Result, SharedString, Size,
-    swap_rgba_pa_to_bgra,
+    AssetSource, DevicePixels, RenderImage, Result, SharedString, Size, swap_rgba_pa_to_bgra,
 };
 use image::Frame;
 use resvg::tiny_skia::Pixmap;
 use smallvec::SmallVec;
 use std::{
-    hash::Hash,
+    collections::HashMap,
     sync::{Arc, LazyLock, OnceLock},
 };
+
+use parking_lot::Mutex;
 
 #[cfg(target_os = "macos")]
 const EMOJI_FONT_FAMILIES: &[&str] = &["Apple Color Emoji", ".AppleColorEmojiUI"];
@@ -80,18 +81,12 @@ fn select_emoji_font(
 /// When rendering SVGs, we render them at twice the size to get a higher-quality result.
 pub const SMOOTH_SVG_SCALE_FACTOR: f32 = 2.;
 
-#[derive(Clone, PartialEq, Hash, Eq)]
-#[expect(missing_docs)]
-pub struct RenderSvgParams {
-    pub path: SharedString,
-    pub size: Size<DevicePixels>,
-}
-
 #[derive(Clone)]
 /// A struct holding everything necessary to render SVGs.
 pub struct SvgRenderer {
     asset_source: Arc<dyn AssetSource>,
     usvg_options: Arc<usvg::Options<'static>>,
+    trees: Arc<Mutex<HashMap<SharedString, (u64, Arc<usvg::Tree>)>>>,
 }
 
 /// The size in which to render the SVG.
@@ -166,7 +161,47 @@ impl SvgRenderer {
         Self {
             asset_source,
             usvg_options: Arc::new(options),
+            trees: Default::default(),
         }
+    }
+
+    pub(crate) fn load_tree(
+        &self,
+        path: &SharedString,
+        bytes: Option<&[u8]>,
+    ) -> Result<Option<Arc<usvg::Tree>>> {
+        if bytes.is_none()
+            && let Some((_, tree)) = self.trees.lock().get(path).cloned()
+        {
+            return Ok(Some(tree));
+        }
+
+        let loaded;
+        let bytes = if let Some(bytes) = bytes {
+            bytes
+        } else {
+            loaded = self.asset_source.load(path)?;
+            let Some(bytes) = loaded.as_deref() else {
+                return Ok(None);
+            };
+            bytes
+        };
+        let content_hash = seahash::hash(bytes);
+        if let Some((_, tree)) = self
+            .trees
+            .lock()
+            .get(path)
+            .filter(|(hash, _)| *hash == content_hash)
+            .cloned()
+        {
+            return Ok(Some(tree));
+        }
+
+        let tree = Arc::new(usvg::Tree::from_data(bytes, &self.usvg_options)?);
+        self.trees
+            .lock()
+            .insert(path.clone(), (content_hash, tree.clone()));
+        Ok(Some(tree))
     }
 
     /// Renders the given bytes into an image buffer.
@@ -192,39 +227,6 @@ impl SvgRenderer {
             image.scale_factor = SMOOTH_SVG_SCALE_FACTOR;
             Arc::new(image)
         })
-    }
-
-    pub(crate) fn render_alpha_mask(
-        &self,
-        params: &RenderSvgParams,
-        bytes: Option<&[u8]>,
-    ) -> Result<Option<(Size<DevicePixels>, Vec<u8>)>> {
-        anyhow::ensure!(!params.size.is_zero(), "can't render at a zero size");
-
-        let render_pixmap = |bytes| {
-            let pixmap = self.render_pixmap(bytes, SvgSize::Size(params.size))?;
-
-            // Convert the pixmap's pixels into an alpha mask.
-            let size = Size::new(
-                DevicePixels(pixmap.width() as i32),
-                DevicePixels(pixmap.height() as i32),
-            );
-            let alpha_mask = pixmap
-                .pixels()
-                .iter()
-                .map(|p| p.alpha())
-                .collect::<Vec<_>>();
-
-            Ok(Some((size, alpha_mask)))
-        };
-
-        if let Some(bytes) = bytes {
-            render_pixmap(bytes)
-        } else if let Some(bytes) = self.asset_source.load(&params.path)? {
-            render_pixmap(&bytes)
-        } else {
-            Ok(None)
-        }
     }
 
     fn render_pixmap(&self, bytes: &[u8], size: SvgSize) -> Result<Pixmap, usvg::Error> {

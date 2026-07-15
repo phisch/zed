@@ -1,19 +1,14 @@
 use crate::{
-    AnyWindowHandle, AtlasKey, AtlasTextureId, AtlasTile, Bounds, DevicePixels,
-    DispatchEventResult, GpuSpecs, Pixels, PlatformAtlas, PlatformDisplay,
+    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, Pixels, PlatformDisplay,
     PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, RequestFrameOptions, Scene, Size, TestPlatform, TileId, WindowAppearance,
+    PromptButton, RequestFrameOptions, Scene, Size, TestPlatform, WindowAppearance,
     WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowParams,
 };
-use collections::HashMap;
 use gpui_util::ResultExt as _;
 use image::RgbaImage;
 use parking_lot::Mutex;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use std::{
-    rc::{Rc, Weak},
-    sync::{self, Arc},
-};
+use std::rc::{Rc, Weak};
 
 pub(crate) struct TestWindowState {
     pub(crate) bounds: Bounds<Pixels>,
@@ -23,8 +18,6 @@ pub(crate) struct TestWindowState {
     pub(crate) edited: bool,
     pub(crate) document_path: Option<std::path::PathBuf>,
     platform: Weak<TestPlatform>,
-    // TODO: Replace with `Rc`
-    sprite_atlas: Arc<dyn PlatformAtlas>,
     renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
     pub(crate) should_close_handler: Option<Box<dyn FnMut() -> bool>>,
     hit_test_window_control_callback: Option<Box<dyn FnMut() -> Option<WindowControlArea>>>,
@@ -64,16 +57,11 @@ impl TestWindow {
         display: Rc<dyn PlatformDisplay>,
         renderer: Option<Box<dyn PlatformHeadlessRenderer>>,
     ) -> Self {
-        let sprite_atlas: Arc<dyn PlatformAtlas> = match &renderer {
-            Some(r) => r.sprite_atlas(),
-            None => Arc::new(TestAtlas::new()),
-        };
         Self(Rc::new(Mutex::new(TestWindowState {
             bounds: params.bounds,
             display,
             platform,
             handle,
-            sprite_atlas,
             renderer,
             title: Default::default(),
             edited: false,
@@ -217,10 +205,6 @@ impl PlatformWindow for TestWindow {
         WindowBackgroundAppearance::Opaque
     }
 
-    fn is_subpixel_rendering_supported(&self) -> bool {
-        false
-    }
-
     fn set_title(&mut self, title: &str) {
         self.0.lock().title = Some(title.to_owned());
     }
@@ -301,10 +285,6 @@ impl PlatformWindow for TestWindow {
         }
     }
 
-    fn sprite_atlas(&self) -> sync::Arc<dyn crate::PlatformAtlas> {
-        self.0.lock().sprite_atlas.clone()
-    }
-
     #[cfg(any(test, feature = "test-support"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<RgbaImage> {
         let scale_factor = self.scale_factor();
@@ -339,70 +319,5 @@ impl PlatformWindow for TestWindow {
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
         None
-    }
-}
-
-pub(crate) struct TestAtlasState {
-    next_id: u32,
-    tiles: HashMap<AtlasKey, AtlasTile>,
-}
-
-pub(crate) struct TestAtlas(Mutex<TestAtlasState>);
-
-impl TestAtlas {
-    pub fn new() -> Self {
-        TestAtlas(Mutex::new(TestAtlasState {
-            next_id: 0,
-            tiles: HashMap::default(),
-        }))
-    }
-}
-
-impl PlatformAtlas for TestAtlas {
-    fn get_or_insert_with<'a>(
-        &self,
-        key: &crate::AtlasKey,
-        build: &mut dyn FnMut() -> anyhow::Result<
-            Option<(Size<crate::DevicePixels>, std::borrow::Cow<'a, [u8]>)>,
-        >,
-    ) -> anyhow::Result<Option<crate::AtlasTile>> {
-        let mut state = self.0.lock();
-        if let Some(&tile) = state.tiles.get(key) {
-            return Ok(Some(tile));
-        }
-        drop(state);
-
-        let Some((size, _)) = build()? else {
-            return Ok(None);
-        };
-
-        let mut state = self.0.lock();
-        state.next_id += 1;
-        let texture_id = state.next_id;
-        state.next_id += 1;
-        let tile_id = state.next_id;
-
-        state.tiles.insert(
-            key.clone(),
-            crate::AtlasTile {
-                texture_id: AtlasTextureId {
-                    index: texture_id,
-                    kind: crate::AtlasTextureKind::Monochrome,
-                },
-                tile_id: TileId(tile_id),
-                padding: 0,
-                bounds: crate::Bounds {
-                    origin: Point::default(),
-                    size,
-                },
-            },
-        );
-
-        Ok(Some(state.tiles[key]))
-    }
-
-    fn remove(&self, key: &AtlasKey) {
-        let mut state = self.0.lock();
-        state.tiles.remove(key);
     }
 }

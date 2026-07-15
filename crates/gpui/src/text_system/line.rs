@@ -1,23 +1,11 @@
 use crate::{
-    App, Bounds, DevicePixels, Half, Hsla, LineLayout, Pixels, Point, RenderGlyphParams, Result,
-    ShapedGlyph, ShapedRun, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window,
-    WrapBoundary, WrappedLineLayout, black, fill, point, px, size,
+    App, Bounds, FontId, GlyphId, Half, Hsla, LineLayout, Pixels, Point, Result, ShapedGlyph,
+    ShapedRun, SharedString, StrikethroughStyle, TextAlign, UnderlineStyle, Window, WrapBoundary,
+    WrappedLineLayout, black, fill, point, px, size,
 };
 use derive_more::{Deref, DerefMut};
 use smallvec::SmallVec;
 use std::sync::Arc;
-
-/// Pre-computed glyph data for efficient painting without per-glyph cache lookups.
-///
-/// This is produced by `ShapedLine::compute_glyph_raster_data` during prepaint
-/// and consumed by `ShapedLine::paint_with_raster_data` during paint.
-#[derive(Clone, Debug)]
-pub struct GlyphRasterData {
-    /// The raster bounds for each glyph, in paint order.
-    pub bounds: Vec<Bounds<DevicePixels>>,
-    /// The render params for each glyph (needed for sprite atlas lookup).
-    pub params: Vec<RenderGlyphParams>,
-}
 
 /// Set the text decoration for a run of text.
 #[derive(Debug, Clone)]
@@ -36,6 +24,35 @@ pub struct DecorationRun {
 
     /// The strikethrough style for this run
     pub strikethrough: Option<StrikethroughStyle>,
+}
+
+struct GlyphPaintBatch {
+    font_id: FontId,
+    color: Hsla,
+    glyphs: Vec<(Point<Pixels>, GlyphId)>,
+}
+
+impl GlyphPaintBatch {
+    fn push(
+        batches: &mut Vec<Self>,
+        font_id: FontId,
+        color: Hsla,
+        position: Point<Pixels>,
+        glyph_id: GlyphId,
+    ) {
+        if let Some(batch) = batches
+            .iter_mut()
+            .find(|batch| batch.font_id == font_id && batch.color == color)
+        {
+            batch.glyphs.push((position, glyph_id));
+        } else {
+            batches.push(Self {
+                font_id,
+                color,
+                glyphs: vec![(position, glyph_id)],
+            });
+        }
+    }
 }
 
 /// A line of text that has been shaped and decorated.
@@ -373,6 +390,7 @@ fn paint_line(
         let mut prev_glyph_position = Point::default();
         let mut max_glyph_size = size(px(0.), px(0.));
         let mut first_glyph_x = origin.x;
+        let mut glyph_batches: Vec<GlyphPaintBatch> = Vec::new();
         for (run_ix, run) in layout.runs.iter().enumerate() {
             max_glyph_size = text_system.bounding_box(run.font_id, layout.font_size).size;
 
@@ -524,24 +542,21 @@ fn paint_line(
                 let content_mask = window.content_mask();
                 if max_glyph_bounds.intersects(&content_mask.bounds) {
                     let vertical_offset = point(px(0.0), glyph.position.y);
-                    if glyph.is_emoji {
-                        window.paint_emoji(
-                            glyph_origin + baseline_offset + vertical_offset,
-                            run.font_id,
-                            glyph.id,
-                            layout.font_size,
-                        )?;
-                    } else {
-                        window.paint_glyph(
-                            glyph_origin + baseline_offset + vertical_offset,
-                            run.font_id,
-                            glyph.id,
-                            layout.font_size,
-                            color,
-                        )?;
-                    }
+                    let position = glyph_origin + baseline_offset + vertical_offset;
+                    let color = if glyph.is_emoji { Hsla::white() } else { color };
+                    GlyphPaintBatch::push(
+                        &mut glyph_batches,
+                        run.font_id,
+                        color,
+                        position,
+                        glyph.id,
+                    );
                 }
             }
+        }
+
+        for batch in glyph_batches {
+            window.paint_glyphs(batch.glyphs, batch.font_id, layout.font_size, batch.color)?;
         }
 
         let mut last_line_end_x = first_glyph_x + layout.width;
@@ -787,6 +802,36 @@ mod tests {
             text: SharedString::new(text),
             decoration_runs: SmallVec::from(decorations.to_vec()),
         }
+    }
+
+    #[test]
+    fn glyph_paint_batches_combine_nonadjacent_matching_styles() {
+        let mut batches = Vec::new();
+        GlyphPaintBatch::push(
+            &mut batches,
+            FontId(0),
+            crate::red(),
+            point(px(1.0), px(2.0)),
+            GlyphId(1),
+        );
+        GlyphPaintBatch::push(
+            &mut batches,
+            FontId(0),
+            crate::blue(),
+            point(px(3.0), px(4.0)),
+            GlyphId(2),
+        );
+        GlyphPaintBatch::push(
+            &mut batches,
+            FontId(0),
+            crate::red(),
+            point(px(5.0), px(6.0)),
+            GlyphId(3),
+        );
+
+        assert_eq!(batches.len(), 2);
+        assert_eq!(batches[0].glyphs.len(), 2);
+        assert_eq!(batches[1].glyphs.len(), 1);
     }
 
     #[test]

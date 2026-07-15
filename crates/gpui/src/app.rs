@@ -1,7 +1,7 @@
 use scheduler::Instant;
 use std::{
     any::{TypeId, type_name},
-    cell::{BorrowMutError, Cell, Ref, RefCell, RefMut},
+    cell::{BorrowMutError, Ref, RefCell, RefMut},
     marker::PhantomData,
     mem,
     ops::{Deref, DerefMut},
@@ -49,10 +49,9 @@ use crate::{
     KeyBinding, KeyContext, Keymap, Keystroke, LayoutId, Menu, MenuItem, OwnedMenu,
     PathPromptOptions, Pixels, Platform, PlatformDisplay, PlatformKeyboardLayout,
     PlatformKeyboardMapper, Point, Priority, PromptBuilder, PromptButton, PromptHandle,
-    PromptLevel, Render, RenderImage, RenderablePromptHandle, Reservation, ScreenCaptureSource,
-    SharedString, SubscriberSet, Subscription, SvgRenderer, Task, TextRenderingMode, TextSystem,
-    ThermalState, Window, WindowAppearance, WindowButtonLayout, WindowHandle, WindowId,
-    WindowInvalidator,
+    PromptLevel, Render, RenderablePromptHandle, Reservation, ScreenCaptureSource, SharedString,
+    SubscriberSet, Subscription, SvgRenderer, Task, TextSystem, ThermalState, Window,
+    WindowAppearance, WindowButtonLayout, WindowHandle, WindowId, WindowInvalidator,
     colors::{Colors, GlobalColors},
     hash, init_app_menus,
 };
@@ -744,8 +743,6 @@ pub struct App {
     pub(crate) inspector_element_registry: InspectorElementRegistry,
     #[cfg(any(test, feature = "test-support", debug_assertions))]
     pub(crate) name: Option<&'static str>,
-    pub(crate) text_rendering_mode: Rc<Cell<TextRenderingMode>>,
-
     pub(crate) window_update_stack: Vec<WindowId>,
     pub(crate) mode: GpuiMode,
     pub(crate) cursor_hide_mode: CursorHideMode,
@@ -791,7 +788,6 @@ impl App {
                 this: this.clone(),
                 platform: platform.clone(),
                 text_system,
-                text_rendering_mode: Rc::new(Cell::new(TextRenderingMode::default())),
                 mode: GpuiMode::Production,
                 actions: Rc::new(ActionRegistry::default()),
                 flushing_effects: false,
@@ -1333,16 +1329,6 @@ impl App {
     /// Reads data from the platform clipboard.
     pub fn read_from_clipboard(&self) -> Option<ClipboardItem> {
         self.platform.read_from_clipboard()
-    }
-
-    /// Sets the text rendering mode for the application.
-    pub fn set_text_rendering_mode(&mut self, mode: TextRenderingMode) {
-        self.text_rendering_mode.set(mode);
-    }
-
-    /// Returns the current text rendering mode for the application.
-    pub fn text_rendering_mode(&self) -> TextRenderingMode {
-        self.text_rendering_mode.get()
     }
 
     /// Writes data to the platform clipboard.
@@ -2508,22 +2494,6 @@ impl App {
     /// Returns `true` if the platform file picker supports selecting a mix of files and directories.
     pub fn can_select_mixed_files_and_dirs(&self) -> bool {
         self.platform.can_select_mixed_files_and_dirs()
-    }
-
-    /// Removes an image from the sprite atlas on all windows.
-    ///
-    /// If the current window is being updated, it will be removed from `App.windows`, you can use `current_window` to specify the current window.
-    /// This is a no-op if the image is not in the sprite atlas.
-    pub fn drop_image(&mut self, image: Arc<RenderImage>, current_window: Option<&mut Window>) {
-        // remove the texture from all other windows
-        for window in self.windows.values_mut().flatten() {
-            _ = window.drop_image(image.clone());
-        }
-
-        // remove the texture from the current window
-        if let Some(window) = current_window {
-            _ = window.drop_image(image);
-        }
     }
 
     /// Sets the renderer for the inspector.

@@ -81,11 +81,8 @@ impl ImageView {
         });
 
         cx.subscribe(&image_item, Self::on_image_event).detach();
-        cx.on_release_in(window, |this, window, cx| {
+        cx.on_release_in(window, |this, _window, cx| {
             let image_data = this.image_item.read(cx).image.clone();
-            if let Some(image) = image_data.clone().get_render_image(window, cx) {
-                cx.drop_image(image, None);
-            }
             image_data.remove_asset(cx);
         })
         .detach();

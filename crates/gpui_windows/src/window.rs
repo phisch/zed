@@ -34,6 +34,36 @@ use gpui::*;
 
 pub(crate) struct WindowsWindow(pub Rc<WindowsWindowInner>);
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct RawWindow {
+    hwnd: NonZeroIsize,
+}
+
+unsafe impl Send for RawWindow {}
+unsafe impl Sync for RawWindow {}
+
+impl RawWindow {
+    fn new(hwnd: HWND) -> Result<Self> {
+        let hwnd = NonZeroIsize::new(hwnd.0 as isize)
+            .context("WGPU renderer received a null Windows window handle")?;
+        Ok(Self { hwnd })
+    }
+}
+
+impl rwh::HasWindowHandle for RawWindow {
+    fn window_handle(&self) -> std::result::Result<rwh::WindowHandle<'_>, rwh::HandleError> {
+        let raw = rwh::Win32WindowHandle::new(self.hwnd).into();
+        // SAFETY: WindowsWindowState owns this handle and drops its renderer before the HWND.
+        Ok(unsafe { rwh::WindowHandle::borrow_raw(raw) })
+    }
+}
+
+impl rwh::HasDisplayHandle for RawWindow {
+    fn display_handle(&self) -> std::result::Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
+        Ok(rwh::DisplayHandle::windows())
+    }
+}
+
 impl std::ops::Deref for WindowsWindow {
     type Target = WindowsWindowInner;
 
@@ -62,12 +92,10 @@ pub struct WindowsWindowState {
     pub hovered: Cell<bool>,
     pub direct_manipulation: DirectManipulationHandler,
 
-    pub renderer: RefCell<DirectXRenderer>,
-    /// Set after a GPU device-lost recovery so the next `draw_window` call is
-    /// treated as a forced render. This guarantees the next frame both
-    /// re-enables drawing (via `mark_drawable`) and bypasses the GPUI view
-    /// cache, which would otherwise replay stale atlas tile references from
-    /// the previous frame and panic in `DirectXAtlasState::texture`.
+    pub renderer: RefCell<gpui_wgpu::WgpuRenderer>,
+    pub raw_window: RawWindow,
+    /// Set after a GPU device-lost recovery or transient surface failure so the next frame
+    /// rebuilds the scene instead of replaying stale renderer resources.
     pub force_render_after_recovery: Cell<bool>,
 
     pub click_state: ClickState,
@@ -77,9 +105,6 @@ pub struct WindowsWindowState {
     pub nc_button_pressed: Cell<Option<u32>>,
 
     pub display: Cell<WindowsDisplay>,
-    /// Flag to instruct the `VSyncProvider` thread to invalidate the directx devices
-    /// as resizing them has failed, causing us to have lost at least the render target.
-    pub invalidate_devices: Arc<AtomicBool>,
     fullscreen: Cell<Option<StyleAndBounds>>,
     initial_placement: Cell<Option<WindowOpenStatus>>,
     hwnd: HWND,
@@ -106,15 +131,13 @@ pub(crate) struct WindowsWindowInner {
 impl WindowsWindowState {
     fn new(
         hwnd: HWND,
-        directx_devices: &DirectXDevices,
+        gpu_context: gpui_wgpu::GpuContext,
         window_params: &CREATESTRUCTW,
         current_cursor: Option<HCURSOR>,
         cursor_visible: Arc<AtomicBool>,
         display: WindowsDisplay,
         min_size: Option<Size<Pixels>>,
         appearance: WindowAppearance,
-        disable_direct_composition: bool,
-        invalidate_devices: Arc<AtomicBool>,
     ) -> Result<Self> {
         let scale_factor = {
             let monitor_dpi = unsafe { GetDpiForWindow(hwnd) } as f32;
@@ -134,8 +157,21 @@ impl WindowsWindowState {
         };
         let border_offset = WindowBorderOffset::default();
         let restore_from_minimized = None;
-        let renderer = DirectXRenderer::new(hwnd, directx_devices, disable_direct_composition)
-            .context("Creating DirectX renderer")?;
+        let raw_window = RawWindow::new(hwnd)?;
+        let renderer = gpui_wgpu::WgpuRenderer::new(
+            gpu_context,
+            &raw_window,
+            gpui_wgpu::WgpuSurfaceConfig {
+                size: size(
+                    DevicePixels(window_params.cx.max(1)),
+                    DevicePixels(window_params.cy.max(1)),
+                ),
+                transparent: false,
+                preferred_present_mode: Some(gpui_wgpu::wgpu::PresentMode::Fifo),
+            },
+            None,
+        )
+        .context("Creating WGPU/Vello renderer")?;
         let callbacks = Callbacks::default();
         let input_handler = None;
         let pending_surrogate = None;
@@ -168,6 +204,7 @@ impl WindowsWindowState {
             last_reported_capslock: Cell::new(last_reported_capslock),
             hovered: Cell::new(hovered),
             renderer: RefCell::new(renderer),
+            raw_window,
             force_render_after_recovery: Cell::new(false),
             click_state,
             current_cursor: Cell::new(current_cursor),
@@ -177,7 +214,6 @@ impl WindowsWindowState {
             fullscreen: Cell::new(fullscreen),
             initial_placement: Cell::new(initial_placement),
             hwnd,
-            invalidate_devices,
             direct_manipulation,
             a11y: RefCell::new(None),
         })
@@ -246,15 +282,13 @@ impl WindowsWindowInner {
     fn new(context: &mut WindowCreateContext, hwnd: HWND, cs: &CREATESTRUCTW) -> Result<Rc<Self>> {
         let state = WindowsWindowState::new(
             hwnd,
-            &context.directx_devices,
+            context.gpu_context.clone(),
             cs,
             context.current_cursor,
             context.cursor_visible.clone(),
             context.display,
             context.min_size,
             context.appearance,
-            context.disable_direct_composition,
-            context.invalidate_devices.clone(),
         )?;
 
         Ok(Rc::new(Self {
@@ -399,9 +433,7 @@ struct WindowCreateContext {
     main_receiver: PriorityQueueReceiver<RunnableVariant>,
     platform_window_handle: HWND,
     appearance: WindowAppearance,
-    disable_direct_composition: bool,
-    directx_devices: DirectXDevices,
-    invalidate_devices: Arc<AtomicBool>,
+    gpu_context: gpui_wgpu::GpuContext,
     parent_hwnd: Option<HWND>,
 }
 
@@ -426,9 +458,7 @@ impl WindowsWindow {
             validation_number,
             main_receiver,
             platform_window_handle,
-            disable_direct_composition,
-            directx_devices,
-            invalidate_devices,
+            gpu_context,
         } = creation_info;
         register_window_class(icon);
         let parent_hwnd = if params.kind == WindowKind::Dialog {
@@ -459,7 +489,7 @@ impl WindowsWindow {
                 .unwrap_or(""),
         );
 
-        let (mut dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
+        let (dwexstyle, dwstyle) = if params.kind == WindowKind::PopUp {
             (WS_EX_TOOLWINDOW, WINDOW_STYLE(0x0))
         } else {
             let mut dwstyle = WS_SYSMENU;
@@ -480,9 +510,6 @@ impl WindowsWindow {
 
             (dwexstyle, dwstyle)
         };
-        if !disable_direct_composition {
-            dwexstyle |= WS_EX_NOREDIRECTIONBITMAP;
-        }
 
         let hinstance = get_module_handle();
         let display = if let Some(display_id) = params.display_id {
@@ -510,9 +537,7 @@ impl WindowsWindow {
             main_receiver,
             platform_window_handle,
             appearance,
-            disable_direct_composition,
-            directx_devices,
-            invalidate_devices,
+            gpu_context,
             parent_hwnd,
         };
         let creation_result = unsafe {
@@ -564,17 +589,13 @@ impl WindowsWindow {
 
 impl rwh::HasWindowHandle for WindowsWindow {
     fn window_handle(&self) -> std::result::Result<rwh::WindowHandle<'_>, rwh::HandleError> {
-        let raw = rwh::Win32WindowHandle::new(unsafe {
-            NonZeroIsize::new_unchecked(self.0.hwnd.0 as isize)
-        })
-        .into();
-        Ok(unsafe { rwh::WindowHandle::borrow_raw(raw) })
+        self.state.raw_window.window_handle()
     }
 }
 
 impl rwh::HasDisplayHandle for WindowsWindow {
     fn display_handle(&self) -> std::result::Result<rwh::DisplayHandle<'_>, rwh::HandleError> {
-        Ok(rwh::DisplayHandle::windows())
+        self.state.raw_window.display_handle()
     }
 }
 
@@ -586,6 +607,7 @@ impl Drop for WindowsWindow {
             .executor
             .spawn(async move {
                 let handle = this.hwnd;
+                this.state.renderer.borrow_mut().destroy();
                 unsafe {
                     RevokeDragDrop(handle).log_err();
                     DestroyWindow(handle).log_err();
@@ -853,10 +875,6 @@ impl PlatformWindow for WindowsWindow {
         self.state.background_appearance.get()
     }
 
-    fn is_subpixel_rendering_supported(&self) -> bool {
-        true
-    }
-
     fn set_title(&mut self, title: &str) {
         unsafe { SetWindowTextW(self.0.hwnd, &HSTRING::from(title)) }
             .inspect_err(|e| log::error!("Set title failed: {e}"))
@@ -888,6 +906,12 @@ impl PlatformWindow for WindowsWindow {
                 dwm_set_window_composition_attribute(hwnd, 4);
             }
         }
+
+        self.state
+            .renderer
+            .borrow_mut()
+            .update_transparency(background_appearance != WindowBackgroundAppearance::Opaque);
+        self.state.force_render_after_recovery.set(true);
     }
 
     fn minimize(&self) {
@@ -975,15 +999,20 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn draw(&self, scene: &Scene) {
-        self.state
-            .renderer
-            .borrow_mut()
-            .draw(scene, self.state.background_appearance.get())
-            .log_err();
-    }
+        let mut renderer = self.state.renderer.borrow_mut();
+        if renderer.device_lost() {
+            if let Err(error) = renderer.recover(&self.state.raw_window) {
+                log::error!("failed to recover Windows Vello renderer: {error:#}");
+            }
+            self.state.force_render_after_recovery.set(true);
+            return;
+        }
 
-    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.state.renderer.borrow().sprite_atlas()
+        let rendered = renderer.draw(scene);
+        let needs_redraw = renderer.needs_redraw();
+        if !rendered || needs_redraw {
+            self.state.force_render_after_recovery.set(true);
+        }
     }
 
     fn get_raw_handle(&self) -> HWND {
@@ -991,7 +1020,7 @@ impl PlatformWindow for WindowsWindow {
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {
-        self.state.renderer.borrow().gpu_specs().log_err()
+        Some(self.state.renderer.borrow().gpu_specs())
     }
 
     fn update_ime_position(&self, bounds: Bounds<Pixels>) {
@@ -1008,6 +1037,15 @@ impl PlatformWindow for WindowsWindow {
     fn play_system_bell(&self) {
         // MB_OK: The sound specified as the Windows Default Beep sound.
         let _ = unsafe { MessageBeep(MB_OK) };
+    }
+
+    #[cfg(any(test, feature = "test-support"))]
+    fn render_to_image(&self, scene: &Scene) -> Result<image::RgbaImage> {
+        use gpui::PlatformHeadlessRenderer as _;
+
+        let size = self.state.renderer.borrow().viewport_size();
+        let mut renderer = gpui_wgpu::VelloHeadlessRenderer::new()?;
+        renderer.render_scene_to_image(scene, size)
     }
 
     fn a11y_init(&self, callbacks: gpui::A11yCallbacks) {

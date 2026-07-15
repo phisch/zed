@@ -1,14 +1,14 @@
 use crate::display::WebDisplay;
 use crate::events::{ClickState, WebEventListeners, is_mac_platform};
-use std::sync::Arc;
+
 use std::{cell::Cell, cell::RefCell, rc::Rc};
 
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, DispatchEventResult, GpuSpecs,
-    Modifiers, MouseButton, Pixels, PlatformAtlas, PlatformDisplay, PlatformInput,
-    PlatformInputHandler, PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions,
-    ResizeEdge, Scene, Size, WindowAppearance, WindowBackgroundAppearance, WindowBounds,
-    WindowControlArea, WindowControls, WindowDecorations, WindowParams, px,
+    Modifiers, MouseButton, Pixels, PlatformDisplay, PlatformInput, PlatformInputHandler,
+    PlatformWindow, Point, PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size,
+    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
+    WindowDecorations, WindowParams, px,
 };
 use gpui_wgpu::{WgpuContext, WgpuRenderer, WgpuSurfaceConfig};
 use wasm_bindgen::prelude::*;
@@ -684,18 +684,6 @@ impl PlatformWindow for WebWindow {
 
     fn completed_frame(&self) {
         // On web, presentation happens automatically via wgpu surface present
-    }
-
-    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        self.inner.state.borrow().renderer.sprite_atlas().clone()
-    }
-
-    fn is_subpixel_rendering_supported(&self) -> bool {
-        self.inner
-            .state
-            .borrow()
-            .renderer
-            .supports_dual_source_blending()
     }
 
     fn gpu_specs(&self) -> Option<GpuSpecs> {

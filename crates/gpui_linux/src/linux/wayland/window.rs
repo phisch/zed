@@ -3,7 +3,6 @@ use std::{
     ffi::c_void,
     ptr::NonNull,
     rc::Rc,
-    sync::Arc,
 };
 
 use collections::{FxHashMap, HashMap};
@@ -33,11 +32,11 @@ use crate::linux::wayland::{display::WaylandDisplay, serial::SerialKind};
 use crate::linux::{Globals, Output, WaylandClientStatePtr, get_window};
 use gpui::{
     AnyWindowHandle, Bounds, Capslock, Decorations, DevicePixels, GpuSpecs, Modifiers, Pixels,
-    PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PromptButton, PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling,
-    WindowAppearance, WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls,
-    WindowDecorations, WindowKind, WindowParams, layer_shell::LayerShellNotSupportedError,
-    popup::PopupOptions, px, size,
+    PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point, PromptButton,
+    PromptLevel, RequestFrameOptions, ResizeEdge, Scene, Size, Tiling, WindowAppearance,
+    WindowBackgroundAppearance, WindowBounds, WindowControlArea, WindowControls, WindowDecorations,
+    WindowKind, WindowParams, layer_shell::LayerShellNotSupportedError, popup::PopupOptions, px,
+    size,
 };
 use gpui_wgpu::{CompositorGpuHint, WgpuRenderer, WgpuSurfaceConfig, wgpu};
 
@@ -588,16 +587,6 @@ impl WaylandWindowState {
             || self.background_appearance != WindowBackgroundAppearance::Opaque
     }
 
-    fn update_subpixel_layout(&mut self) {
-        use wayland_client::protocol::wl_output::Subpixel;
-        let is_bgr = self
-            .display
-            .as_ref()
-            .and_then(|(_, output)| output.subpixel)
-            .is_some_and(|s| s == Subpixel::HorizontalBgr);
-        self.renderer.set_subpixel_layout(is_bgr);
-    }
-
     pub fn primary_output_scale(&mut self) -> i32 {
         let mut scale = 1;
         let mut current_output = self.display.take();
@@ -1140,7 +1129,6 @@ impl WaylandWindowStatePtr {
                 state.outputs.insert(id, output.clone());
 
                 let scale = state.primary_output_scale();
-                state.update_subpixel_layout();
 
                 // We use `PreferredBufferScale` instead to set the scale if it's available
                 if state.surface.version() < wl_surface::EVT_PREFERRED_BUFFER_SCALE_SINCE {
@@ -1153,7 +1141,6 @@ impl WaylandWindowStatePtr {
                 state.outputs.remove(&output.id());
 
                 let scale = state.primary_output_scale();
-                state.update_subpixel_layout();
 
                 // We use `PreferredBufferScale` instead to set the scale if it's available
                 if state.surface.version() < wl_surface::EVT_PREFERRED_BUFFER_SCALE_SINCE {
@@ -1573,16 +1560,6 @@ impl PlatformWindow for WaylandWindow {
         self.borrow().background_appearance
     }
 
-    fn is_subpixel_rendering_supported(&self) -> bool {
-        let client = self.borrow().client.get_client();
-        let state = client.borrow();
-        state
-            .gpu_context
-            .borrow()
-            .as_ref()
-            .is_some_and(|ctx| ctx.supports_dual_source_blending())
-    }
-
     fn minimize(&self) {
         if let Some(toplevel) = self.borrow().surface_state.toplevel() {
             toplevel.set_minimized();
@@ -1700,11 +1677,6 @@ impl PlatformWindow for WaylandWindow {
         }
 
         state.renderer_presented = false;
-    }
-
-    fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
-        let state = self.borrow();
-        state.renderer.sprite_atlas().clone()
     }
 
     fn show_window_menu(&self, position: Point<Pixels>) {

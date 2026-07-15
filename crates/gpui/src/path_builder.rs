@@ -1,5 +1,4 @@
 use anyhow::Error;
-use etagere::euclid::{Point2D, Vector2D};
 use lyon::geom::Angle;
 use lyon::math::{Vector, vector};
 use lyon::path::traits::SvgPathBuilder;
@@ -63,12 +62,6 @@ impl From<Point<Pixels>> for lyon::math::Point {
 impl From<Point<Pixels>> for Vector {
     fn from(p: Point<Pixels>) -> Self {
         vector(p.x.0, p.y.0)
-    }
-}
-
-impl From<Point<Pixels>> for Point2D<f32, Pixels> {
-    fn from(p: Point<Pixels>) -> Self {
-        Point2D::new(p.x.0, p.y.0)
     }
 }
 
@@ -210,7 +203,7 @@ impl PathBuilder {
     #[inline]
     pub fn translate(&mut self, to: Point<Pixels>) {
         if let Some(transform) = self.transform {
-            self.transform = Some(transform.then_translate(Vector2D::new(to.x.0, to.y.0)));
+            self.transform = Some(transform.then_translate(vector(to.x.0, to.y.0)));
         } else {
             self.transform = Some(Transform::translation(to.x.0, to.y.0))
         }
@@ -336,10 +329,7 @@ impl PathBuilder {
             let v1 = buf.vertices[i1];
             let v2 = buf.vertices[i2];
 
-            path.push_triangle(
-                (v0.into(), v1.into(), v2.into()),
-                (point(0., 1.), point(0., 1.), point(0., 1.)),
-            );
+            path.push_triangle((v0.into(), v1.into(), v2.into()));
         }
 
         path

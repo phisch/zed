@@ -1,4 +1,3 @@
-use std::mem;
 use std::sync::Arc;
 
 use file_icons::FileIcons;
@@ -94,7 +93,7 @@ impl SvgPreviewView {
                             cx.notify();
                         }
                     } else {
-                        this.set_current(None, window, cx);
+                        this.set_current(None, cx);
                     }
                 }
             },
@@ -116,9 +115,9 @@ impl SvgPreviewView {
         self._refresh = cx.spawn_in(window, async move |this, cx| {
             let result = background_task.await;
 
-            this.update_in(cx, |view, window, cx| {
+            this.update(cx, |view, cx| {
                 let current = result.map_err(|e| e.to_string().into());
-                view.set_current(Some(current), window, cx);
+                view.set_current(Some(current), cx);
             })
             .ok();
         });
@@ -127,12 +126,9 @@ impl SvgPreviewView {
     fn set_current(
         &mut self,
         image: Option<Result<Arc<RenderImage>, SharedString>>,
-        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        if let Some(Ok(image)) = mem::replace(&mut self.current_svg, image) {
-            window.drop_image(image).ok();
-        }
+        self.current_svg = image;
         cx.notify();
     }
 

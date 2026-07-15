@@ -1,9 +1,8 @@
 //! Cross-platform headless app context for tests that need real text shaping.
 //!
-//! This replaces the macOS-only `HeadlessMetalAppContext` with a platform-neutral
-//! implementation backed by `TestPlatform`. Tests supply a real `PlatformTextSystem`
-//! (e.g. `DirectWriteTextSystem` on Windows, `MacTextSystem` on macOS) to get
-//! accurate glyph measurements while keeping everything else deterministic.
+//! The implementation is backed by `TestPlatform`. Tests supply a real
+//! `PlatformTextSystem`, such as the shared Parley text system, to get accurate glyph
+//! measurements while keeping everything else deterministic.
 //!
 //! Optionally, a renderer factory can be provided to enable real GPU rendering
 //! and screenshot capture via [`HeadlessAppContext::capture_screenshot`].
@@ -21,14 +20,13 @@ use std::{future::Future, rc::Rc, sync::Arc, time::Duration};
 
 /// A cross-platform headless app context for tests that need real text shaping.
 ///
-/// Unlike the old `HeadlessMetalAppContext`, this works on any platform. It uses
-/// `TestPlatform` for deterministic scheduling and accepts a pluggable
-/// `PlatformTextSystem` so tests get real glyph measurements.
+/// This works on any platform. It uses `TestPlatform` for deterministic scheduling
+/// and accepts a pluggable `PlatformTextSystem` so tests get real glyph measurements.
 ///
 /// # Usage
 ///
 /// ```ignore
-/// let text_system = Arc::new(gpui_wgpu::CosmicTextSystem::new("fallback"));
+/// let text_system = Arc::new(gpui_wgpu::ParleyTextSystem::new("fallback"));
 /// let mut cx = HeadlessAppContext::with_platform(
 ///     text_system,
 ///     Arc::new(Assets),

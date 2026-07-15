@@ -1008,7 +1008,6 @@ impl VsCodeSettings {
         WorkspaceSettingsContent {
             active_pane_modifiers: self.active_pane_modifiers(),
             accessible_mode: None,
-            text_rendering_mode: None,
             autosave: self.read_enum("files.autoSave", |s| match s {
                 "off" => Some(AutosaveSetting::Off),
                 "afterDelay" => Some(AutosaveSetting::AfterDelay {
