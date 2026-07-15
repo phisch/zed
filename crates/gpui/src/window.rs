@@ -3768,11 +3768,19 @@ impl Window {
         let opacity = self.element_opacity();
         let snapped_bounds = self.snap_bounds(quad.bounds);
         let snapped_border_widths = self.snap_border_widths(quad.border_widths);
+        let content_mask = self.snapped_content_mask();
+        if snapped_bounds.intersect(&content_mask.bounds).is_empty() {
+            return;
+        }
+        let background = self
+            .next_frame
+            .scene
+            .pack_background(&quad.background, opacity);
         self.next_frame.scene.insert_primitive(Quad {
             order: 0,
             bounds: snapped_bounds,
-            content_mask: self.snapped_content_mask(),
-            background: quad.background.opacity(opacity),
+            content_mask,
+            background,
             border_color: quad.border_color.opacity(opacity),
             corner_radii: quad.corner_radii.scale(self.scale_factor()),
             border_widths: snapped_border_widths,
@@ -3790,11 +3798,13 @@ impl Window {
         let content_mask = self.content_mask();
         let opacity = self.element_opacity();
         path.content_mask = content_mask;
+        let mut path = path.scale(scale_factor);
+        if path.bounds.intersect(&path.content_mask.bounds).is_empty() {
+            return;
+        }
         let color: Background = color.into();
-        path.color = color.opacity(opacity);
-        self.next_frame
-            .scene
-            .insert_primitive(path.scale(scale_factor));
+        path.color = self.next_frame.scene.pack_background(&color, opacity);
+        self.next_frame.scene.insert_primitive(path);
     }
 
     /// Paint an underline into the scene for the next frame at the current z-index.

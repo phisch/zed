@@ -7,9 +7,9 @@ use cocoa::{
     quartzcore::AutoresizingMask,
 };
 use gpui::{
-    AtlasTextureId, Background, Bounds, ContentMask, DevicePixels, MonochromeSprite, PaintSurface,
-    Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size,
-    Surface, Underline, point, size,
+    AtlasTextureId, Bounds, ContentMask, DevicePixels, GpuBackground, MonochromeSprite,
+    PaintSurface, Path, Point, PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow,
+    Size, Surface, Underline, point, size,
 };
 #[cfg(any(test, feature = "test-support"))]
 use image::RgbaImage;
@@ -143,9 +143,11 @@ pub(crate) struct MetalRenderer {
 pub struct PathRasterizationVertex {
     pub xy_position: Point<ScaledPixels>,
     pub st_position: Point<f32>,
-    pub color: Background,
+    pub color: GpuBackground,
     pub bounds: Bounds<ScaledPixels>,
 }
+
+const _: () = assert!(std::mem::size_of::<PathRasterizationVertex>() == 88);
 
 impl MetalRenderer {
     /// Creates a new MetalRenderer with a CAMetalLayer for window-based rendering.
@@ -835,7 +837,19 @@ impl MetalRenderer {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
-        let mut instance_offset = 0;
+        let stops = scene.gradient_stops();
+        let mut instance_offset = mem::size_of_val(stops);
+        if instance_offset > instance_buffer.size {
+            anyhow::bail!("scene too large: {} gradient stops", stops.len());
+        }
+        // SAFETY: The size check guarantees the mapped instance buffer can hold all stops.
+        unsafe {
+            ptr::copy_nonoverlapping(
+                stops.as_ptr() as *const u8,
+                instance_buffer.metal_buffer.contents() as *mut u8,
+                instance_offset,
+            );
+        }
 
         let mut command_encoder = new_command_encoder_for_texture(
             command_buffer,
@@ -1024,6 +1038,11 @@ impl MetalRenderer {
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
         );
+        command_encoder.set_fragment_buffer(
+            PathRasterizationInputIndex::GradientStops as u64,
+            Some(&instance_buffer.metal_buffer),
+            0,
+        );
         let buffer_contents =
             unsafe { (instance_buffer.metal_buffer.contents() as *mut u8).add(*instance_offset) };
         unsafe {
@@ -1135,6 +1154,11 @@ impl MetalRenderer {
             QuadInputIndex::Quads as u64,
             Some(&instance_buffer.metal_buffer),
             *instance_offset as u64,
+        );
+        command_encoder.set_fragment_buffer(
+            QuadInputIndex::GradientStops as u64,
+            Some(&instance_buffer.metal_buffer),
+            0,
         );
 
         command_encoder.set_vertex_bytes(
@@ -1718,6 +1742,7 @@ enum QuadInputIndex {
     Vertices = 0,
     Quads = 1,
     ViewportSize = 2,
+    GradientStops = 3,
 }
 
 #[repr(C)]
@@ -1750,6 +1775,7 @@ enum SurfaceInputIndex {
 enum PathRasterizationInputIndex {
     Vertices = 0,
     ViewportSize = 1,
+    GradientStops = 2,
 }
 
 #[derive(Clone, Debug, Eq, PartialEq)]

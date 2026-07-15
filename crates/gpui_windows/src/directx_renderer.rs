@@ -90,6 +90,50 @@ struct DirectXRenderPipelines {
     mono_sprites: PipelineState<MonochromeSprite>,
     subpixel_sprites: PipelineState<SubpixelSprite>,
     poly_sprites: PipelineState<PolychromeSprite>,
+    gradient_stops: GradientStopsBuffer,
+}
+
+struct GradientStopsBuffer {
+    buffer: ID3D11Buffer,
+    buffer_size: usize,
+    view: Option<ID3D11ShaderResourceView>,
+}
+
+impl GradientStopsBuffer {
+    fn new(device: &ID3D11Device) -> Result<Self> {
+        let buffer_size = 64;
+        let buffer = create_buffer(device, std::mem::size_of::<LinearColorStop>(), buffer_size)?;
+        let view = create_buffer_view(device, &buffer)?;
+        Ok(Self {
+            buffer,
+            buffer_size,
+            view,
+        })
+    }
+
+    fn update_buffer(
+        &mut self,
+        device: &ID3D11Device,
+        device_context: &ID3D11DeviceContext,
+        stops: &[LinearColorStop],
+    ) -> Result<()> {
+        if self.buffer_size < stops.len() {
+            let new_buffer_size = stops
+                .len()
+                .checked_next_power_of_two()
+                .context("gradient stop buffer is too large")?;
+            let buffer = create_buffer(
+                device,
+                std::mem::size_of::<LinearColorStop>(),
+                new_buffer_size,
+            )?;
+            let view = create_buffer_view(device, &buffer)?;
+            self.buffer = buffer;
+            self.view = view;
+            self.buffer_size = new_buffer_size;
+        }
+        update_buffer(device_context, &self.buffer, stops)
+    }
 }
 
 struct DirectXGlobalElements {
@@ -401,6 +445,22 @@ impl DirectXRenderer {
 
     fn upload_scene_buffers(&mut self, scene: &Scene) -> Result<()> {
         let devices = self.devices.as_ref().context("devices missing")?;
+
+        if !scene.gradient_stops().is_empty() {
+            self.pipelines.gradient_stops.update_buffer(
+                &devices.device,
+                &devices.device_context,
+                scene.gradient_stops(),
+            )?;
+        }
+        // Empty frames can retain this binding because their stop counts are zero.
+        // SAFETY: The renderer owns the shader-resource view for the duration of the draw.
+        unsafe {
+            devices.device_context.PSSetShaderResources(
+                2,
+                Some(std::slice::from_ref(&self.pipelines.gradient_stops.view)),
+            );
+        }
 
         if !scene.shadows.is_empty() {
             self.pipelines.shadow_pipeline.update_buffer(
@@ -882,6 +942,8 @@ impl DirectXRenderPipelines {
             create_blend_state(device)?,
         )?;
 
+        let gradient_stops = GradientStopsBuffer::new(device)?;
+
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
@@ -891,6 +953,7 @@ impl DirectXRenderPipelines {
             mono_sprites,
             subpixel_sprites,
             poly_sprites,
+            gradient_stops,
         })
     }
 }
@@ -1152,9 +1215,11 @@ impl<T> PipelineState<T> {
 struct PathRasterizationSprite {
     xy_position: Point<ScaledPixels>,
     st_position: Point<f32>,
-    color: Background,
+    color: GpuBackground,
     bounds: Bounds<ScaledPixels>,
 }
+
+const _: () = assert!(std::mem::size_of::<PathRasterizationSprite>() == 88);
 
 #[derive(Clone, Copy)]
 #[repr(C)]
@@ -1482,13 +1547,19 @@ fn create_buffer(
     element_size: usize,
     buffer_size: usize,
 ) -> Result<ID3D11Buffer> {
+    let byte_width = element_size
+        .checked_mul(buffer_size)
+        .and_then(|size| u32::try_from(size).ok())
+        .context("structured buffer is too large")?;
+    let structure_byte_stride =
+        u32::try_from(element_size).context("structured buffer element is too large")?;
     let desc = D3D11_BUFFER_DESC {
-        ByteWidth: (element_size * buffer_size) as u32,
+        ByteWidth: byte_width,
         Usage: D3D11_USAGE_DYNAMIC,
         BindFlags: D3D11_BIND_SHADER_RESOURCE.0 as u32,
         CPUAccessFlags: D3D11_CPU_ACCESS_WRITE.0 as u32,
         MiscFlags: D3D11_RESOURCE_MISC_BUFFER_STRUCTURED.0 as u32,
-        StructureByteStride: element_size as u32,
+        StructureByteStride: structure_byte_stride,
     };
     let mut buffer = None;
     unsafe { device.CreateBuffer(&desc, None, Some(&mut buffer)) }?;

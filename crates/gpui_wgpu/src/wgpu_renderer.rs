@@ -1,7 +1,7 @@
 use crate::{CompositorGpuHint, WgpuAtlas, WgpuContext};
 use bytemuck::{Pod, Zeroable};
 use gpui::{
-    AtlasTextureId, Background, Bounds, DevicePixels, GpuSpecs, MonochromeSprite, Path, Point,
+    AtlasTextureId, Bounds, DevicePixels, GpuBackground, GpuSpecs, MonochromeSprite, Path, Point,
     PolychromeSprite, PrimitiveBatch, Quad, ScaledPixels, Scene, Shadow, Size, SubpixelSprite,
     Underline, get_gamma_correction_ratios,
 };
@@ -65,9 +65,11 @@ struct PathSprite {
 struct PathRasterizationVertex {
     xy_position: Point<ScaledPixels>,
     st_position: Point<f32>,
-    color: Background,
+    color: GpuBackground,
     bounds: Bounds<ScaledPixels>,
 }
+
+const _: () = assert!(std::mem::size_of::<PathRasterizationVertex>() == 88);
 
 pub struct WgpuSurfaceConfig {
     pub size: Size<DevicePixels>,
@@ -116,6 +118,7 @@ struct WgpuResources {
     globals_bind_group: wgpu::BindGroup,
     path_globals_bind_group: wgpu::BindGroup,
     instance_buffer: wgpu::Buffer,
+    gradient_stops_buffer: wgpu::Buffer,
     path_intermediate_texture: Option<wgpu::Texture>,
     path_intermediate_view: Option<wgpu::TextureView>,
     path_msaa_texture: Option<wgpu::Texture>,
@@ -144,6 +147,7 @@ pub struct WgpuRenderer {
     path_globals_offset: u64,
     gamma_offset: u64,
     instance_buffer_capacity: u64,
+    max_gradient_stops_buffer_size: u64,
     max_buffer_size: u64,
     storage_buffer_alignment: u64,
     rendering_params: RenderingParameters,
@@ -382,6 +386,8 @@ impl WgpuRenderer {
         });
 
         let max_buffer_size = device.limits().max_buffer_size;
+        let max_gradient_stops_buffer_size =
+            max_buffer_size.min(device.limits().max_storage_buffer_binding_size);
         let storage_buffer_alignment = device.limits().min_storage_buffer_offset_alignment as u64;
         let initial_instance_buffer_capacity = 2 * 1024 * 1024;
         let instance_buffer = device.create_buffer(&wgpu::BufferDescriptor {
@@ -391,51 +397,18 @@ impl WgpuRenderer {
             mapped_at_creation: false,
         });
 
-        let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("globals_bind_group"),
-            layout: &bind_group_layouts.globals,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: 0,
-                        size: Some(NonZeroU64::new(globals_size).unwrap()),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: gamma_offset,
-                        size: Some(NonZeroU64::new(gamma_size).unwrap()),
-                    }),
-                },
-            ],
-        });
+        let initial_gradient_stops_capacity = (16 * 1024).min(max_gradient_stops_buffer_size);
+        let gradient_stops_buffer =
+            Self::create_gradient_stops_buffer(&device, initial_gradient_stops_capacity);
 
-        let path_globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("path_globals_bind_group"),
-            layout: &bind_group_layouts.globals,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: path_globals_offset,
-                        size: Some(NonZeroU64::new(globals_size).unwrap()),
-                    }),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
-                        buffer: &globals_buffer,
-                        offset: gamma_offset,
-                        size: Some(NonZeroU64::new(gamma_size).unwrap()),
-                    }),
-                },
-            ],
-        });
+        let (globals_bind_group, path_globals_bind_group) = Self::create_globals_bind_groups(
+            &device,
+            &bind_group_layouts.globals,
+            &globals_buffer,
+            &gradient_stops_buffer,
+            path_globals_offset,
+            gamma_offset,
+        );
 
         let adapter_info = context.adapter.get_info();
 
@@ -457,6 +430,7 @@ impl WgpuRenderer {
             globals_bind_group,
             path_globals_bind_group,
             instance_buffer,
+            gradient_stops_buffer,
             // Defer intermediate texture creation to first draw call via ensure_intermediate_textures().
             // This avoids panics when the device/surface is in an invalid state during initialization.
             path_intermediate_texture: None,
@@ -474,6 +448,7 @@ impl WgpuRenderer {
             path_globals_offset,
             gamma_offset,
             instance_buffer_capacity: initial_instance_buffer_capacity,
+            max_gradient_stops_buffer_size,
             max_buffer_size,
             storage_buffer_alignment,
             rendering_params,
@@ -489,6 +464,99 @@ impl WgpuRenderer {
             surface_configured: true,
             needs_redraw: false,
         })
+    }
+
+    fn create_gradient_stops_buffer(device: &wgpu::Device, capacity: u64) -> wgpu::Buffer {
+        device.create_buffer(&wgpu::BufferDescriptor {
+            label: Some("gradient_stops_buffer"),
+            size: capacity,
+            usage: wgpu::BufferUsages::STORAGE | wgpu::BufferUsages::COPY_DST,
+            mapped_at_creation: false,
+        })
+    }
+
+    fn create_globals_bind_groups(
+        device: &wgpu::Device,
+        globals_layout: &wgpu::BindGroupLayout,
+        globals_buffer: &wgpu::Buffer,
+        gradient_stops_buffer: &wgpu::Buffer,
+        path_globals_offset: u64,
+        gamma_offset: u64,
+    ) -> (wgpu::BindGroup, wgpu::BindGroup) {
+        let globals_size = std::mem::size_of::<GlobalParams>() as u64;
+        let gamma_size = std::mem::size_of::<GammaParams>() as u64;
+        let entries = |globals_offset| {
+            [
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: globals_buffer,
+                        offset: globals_offset,
+                        size: NonZeroU64::new(globals_size),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Buffer(wgpu::BufferBinding {
+                        buffer: globals_buffer,
+                        offset: gamma_offset,
+                        size: NonZeroU64::new(gamma_size),
+                    }),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 2,
+                    resource: gradient_stops_buffer.as_entire_binding(),
+                },
+            ]
+        };
+        let globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("globals_bind_group"),
+            layout: globals_layout,
+            entries: &entries(0),
+        });
+        let path_globals_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("path_globals_bind_group"),
+            layout: globals_layout,
+            entries: &entries(path_globals_offset),
+        });
+        (globals_bind_group, path_globals_bind_group)
+    }
+
+    /// Upload this frame's gradient stops, growing the stops buffer (and rebuilding the
+    /// globals bind groups that reference it) when it is too small.
+    fn upload_gradient_stops(&mut self, scene: &Scene) {
+        // SAFETY: LinearColorStop is repr(C), fully initialized, and has no padding.
+        let data = unsafe { Self::instance_bytes(scene.gradient_stops()) };
+        if data.is_empty() {
+            return;
+        }
+        let data_len = data.len() as u64;
+        if data_len > self.resources().gradient_stops_buffer.size() {
+            let capacity = data_len
+                .checked_next_power_of_two()
+                .map_or(self.max_gradient_stops_buffer_size, |capacity| {
+                    capacity.min(self.max_gradient_stops_buffer_size)
+                });
+            let path_globals_offset = self.path_globals_offset;
+            let gamma_offset = self.gamma_offset;
+            let resources = self.resources_mut();
+            resources.gradient_stops_buffer =
+                Self::create_gradient_stops_buffer(&resources.device, capacity);
+            let (globals_bind_group, path_globals_bind_group) = Self::create_globals_bind_groups(
+                &resources.device,
+                &resources.bind_group_layouts.globals,
+                &resources.globals_buffer,
+                &resources.gradient_stops_buffer,
+                path_globals_offset,
+                gamma_offset,
+            );
+            resources.globals_bind_group = globals_bind_group;
+            resources.path_globals_bind_group = path_globals_bind_group;
+        }
+        let resources = self.resources();
+        resources
+            .queue
+            .write_buffer(&resources.gradient_stops_buffer, 0, data);
     }
 
     fn create_bind_group_layouts(device: &wgpu::Device) -> WgpuBindGroupLayouts {
@@ -517,6 +585,16 @@ impl WgpuRenderer {
                             min_binding_size: NonZeroU64::new(
                                 std::mem::size_of::<GammaParams>() as u64
                             ),
+                        },
+                        count: None,
+                    },
+                    wgpu::BindGroupLayoutEntry {
+                        binding: 2,
+                        visibility: wgpu::ShaderStages::FRAGMENT,
+                        ty: wgpu::BindingType::Buffer {
+                            ty: wgpu::BufferBindingType::Storage { read_only: true },
+                            has_dynamic_offset: false,
+                            min_binding_size: None,
                         },
                         count: None,
                     },
@@ -1091,6 +1169,14 @@ impl WgpuRenderer {
         if !self.surface_configured {
             return false;
         }
+        let gradient_stops_size = std::mem::size_of_val(scene.gradient_stops()) as u64;
+        if gradient_stops_size > self.max_gradient_stops_buffer_size {
+            log::error!(
+                "gradient stop buffer is too large: {gradient_stops_size} bytes (limit: {} bytes)",
+                self.max_gradient_stops_buffer_size
+            );
+            return false;
+        }
 
         let last_error = self.last_error.lock().unwrap().take();
         if let Some(error) = last_error {
@@ -1201,6 +1287,8 @@ impl WgpuRenderer {
                 bytemuck::bytes_of(&gamma_params),
             );
         }
+
+        self.upload_gradient_stops(scene);
 
         loop {
             let mut instance_offset: u64 = 0;

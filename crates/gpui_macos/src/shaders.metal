@@ -4,10 +4,6 @@
 using namespace metal;
 
 float4 hsla_to_rgba(Hsla hsla);
-float3 srgb_to_linear(float3 color);
-float3 linear_to_srgb(float3 color);
-float4 srgb_to_oklab(float4 color);
-float4 oklab_to_srgb(float4 color);
 float4 to_device_position(float2 unit_vertex, Bounds_ScaledPixels bounds,
                           constant Size_DevicePixels *viewport_size);
 float4 to_device_position_transformed(float2 unit_vertex, Bounds_ScaledPixels bounds,
@@ -33,24 +29,14 @@ float2 erf(float2 x);
 float blur_along_x(float x, float y, float sigma, float corner,
                    float2 half_size);
 float4 over(float4 below, float4 above);
-float radians(float degrees);
-float4 fill_color(Background background, float2 position, Bounds_ScaledPixels bounds,
-  float4 solid_color, float4 color0, float4 color1);
-
-struct GradientColor {
-  float4 solid;
-  float4 color0;
-  float4 color1;
-};
-GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid, Hsla color0, Hsla color1);
+float4 fill_color(GpuBackground background, float2 position, Bounds_ScaledPixels bounds,
+  constant LinearColorStop *gradient_stops);
+float4 dither_gradient(float4 color, float2 position);
 
 struct QuadVertexOutput {
   uint quad_id [[flat]];
   float4 position [[position]];
   float4 border_color [[flat]];
-  float4 background_solid [[flat]];
-  float4 background_color0 [[flat]];
-  float4 background_color1 [[flat]];
   float clip_distance [[clip_distance]][4];
 };
 
@@ -58,9 +44,6 @@ struct QuadFragmentInput {
   uint quad_id [[flat]];
   float4 position [[position]];
   float4 border_color [[flat]];
-  float4 background_solid [[flat]];
-  float4 background_color0 [[flat]];
-  float4 background_color1 [[flat]];
 };
 
 vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
@@ -79,30 +62,21 @@ vertex QuadVertexOutput quad_vertex(uint unit_vertex_id [[vertex_id]],
                                                  quad.content_mask.bounds);
   float4 border_color = hsla_to_rgba(quad.border_color);
 
-  GradientColor gradient = prepare_fill_color(
-    quad.background.tag,
-    quad.background.color_space,
-    quad.background.solid,
-    quad.background.colors[0].color,
-    quad.background.colors[1].color
-  );
-
   return QuadVertexOutput{
       quad_id,
       device_position,
       border_color,
-      gradient.solid,
-      gradient.color0,
-      gradient.color1,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
 
 fragment float4 quad_fragment(QuadFragmentInput input [[stage_in]],
                               constant Quad *quads
-                              [[buffer(QuadInputIndex_Quads)]]) {
+                              [[buffer(QuadInputIndex_Quads)]],
+                              constant LinearColorStop *gradient_stops
+                              [[buffer(QuadInputIndex_GradientStops)]]) {
   Quad quad = quads[input.quad_id];
   float4 background_color = fill_color(quad.background, input.position.xy, quad.bounds,
-    input.background_solid, input.background_color0, input.background_color1);
+    gradient_stops);
 
   bool unrounded = quad.corner_radii.top_left == 0.0 &&
     quad.corner_radii.bottom_left == 0.0 &&
@@ -771,13 +745,15 @@ vertex PathRasterizationVertexOutput path_rasterization_vertex(
 
 fragment float4 path_rasterization_fragment(
   PathRasterizationFragmentInput input [[stage_in]],
-  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]]
+  constant PathRasterizationVertex *vertices [[buffer(PathRasterizationInputIndex_Vertices)]],
+  constant LinearColorStop *gradient_stops
+  [[buffer(PathRasterizationInputIndex_GradientStops)]]
 ) {
   float2 dx = dfdx(input.st_position);
   float2 dy = dfdy(input.st_position);
 
   PathRasterizationVertex v = vertices[input.vertex_id];
-  Background background = v.color;
+  GpuBackground background = v.color;
   Bounds_ScaledPixels path_bounds = v.bounds;
   float alpha;
   if (length(float2(dx.x, dy.x)) < 0.001) {
@@ -792,22 +768,7 @@ fragment float4 path_rasterization_fragment(
     alpha = saturate(0.5 - distance);
   }
 
-  GradientColor gradient_color = prepare_fill_color(
-    background.tag,
-    background.color_space,
-    background.solid,
-    background.colors[0].color,
-    background.colors[1].color
-  );
-
-  float4 color = fill_color(
-    background,
-    input.position.xy,
-    path_bounds,
-    gradient_color.solid,
-    gradient_color.color0,
-    gradient_color.color1
-  );
+  float4 color = fill_color(background, input.position.xy, path_bounds, gradient_stops);
   return float4(color.rgb * color.a * alpha, alpha * color.a);
 }
 
@@ -947,12 +908,19 @@ float4 hsla_to_rgba(Hsla hsla) {
   return rgba;
 }
 
+// Extended-range sRGB transfer functions preserve the sign of out-of-gamut values.
 float3 srgb_to_linear(float3 color) {
-  return pow(color, float3(2.2));
+  float3 magnitude = abs(color);
+  float3 lower = magnitude / 12.92;
+  float3 higher = pow((magnitude + 0.055) / 1.055, float3(2.4));
+  return sign(color) * select(lower, higher, magnitude > 0.04045);
 }
 
 float3 linear_to_srgb(float3 color) {
-  return pow(color, float3(1.0 / 2.2));
+  float3 magnitude = abs(color);
+  float3 lower = magnitude * 12.92;
+  float3 higher = 1.055 * pow(magnitude, float3(1.0 / 2.4)) - 0.055;
+  return sign(color) * select(lower, higher, magnitude > 0.0031308);
 }
 
 // Converts a sRGB color to the Oklab color space.
@@ -1150,25 +1118,73 @@ float4 over(float4 below, float4 above) {
   return result;
 }
 
-GradientColor prepare_fill_color(uint tag, uint color_space, Hsla solid,
-                                     Hsla color0, Hsla color1) {
-  GradientColor out;
-  if (tag == 0 || tag == 2 || tag == 3) {
-    out.solid = hsla_to_rgba(solid);
-  } else if (tag == 1) {
-    out.color0 = hsla_to_rgba(color0);
-    out.color1 = hsla_to_rgba(color1);
-
-    // Prepare color space in vertex for avoid conversion
-    // in fragment shader for performance reasons
-    if (color_space == 1) {
-      // Oklab
-      out.color0 = srgb_to_oklab(out.color0);
-      out.color1 = srgb_to_oklab(out.color1);
-    }
+// Convert gamma-encoded sRGB output into the requested interpolation space.
+float4 gradient_stop_in_space(Hsla color, uint color_space) {
+  float4 rgba = hsla_to_rgba(color);
+  if (color_space == 1) {
+    // Oklab
+    return srgb_to_oklab(rgba);
   }
+  return rgba;
+}
 
-  return out;
+// Sample CSS stops with premultiplied alpha; endpoint colors extend beyond their stops.
+// Returns a dithered gamma-encoded sRGB color.
+float4 sample_gradient_stops(GpuBackground background, float t, float2 position,
+                             constant LinearColorStop *gradient_stops) {
+  if (background.stop_count == 0) {
+    return float4(0.0);
+  }
+  uint first = background.stop_offset;
+  uint last = background.stop_offset + background.stop_count - 1;
+  LinearColorStop lo = gradient_stops[first];
+  LinearColorStop hi = gradient_stops[last];
+  float local = 0.0;
+  if (t <= lo.percentage) {
+    hi = lo;
+  } else if (t >= hi.percentage) {
+    lo = hi;
+  } else {
+    for (uint i = first + 1; i <= last; i++) {
+      if (t <= gradient_stops[i].percentage) {
+        lo = gradient_stops[i - 1];
+        hi = gradient_stops[i];
+        break;
+      }
+    }
+    local = clamp(
+      (t - lo.percentage) / (hi.percentage - lo.percentage),
+      0.0, 1.0);
+  }
+  float4 lo_color = gradient_stop_in_space(lo.color, background.color_space);
+  float4 hi_color = gradient_stop_in_space(hi.color, background.color_space);
+  lo_color.rgb *= lo_color.a;
+  hi_color.rgb *= hi_color.a;
+  float4 color = mix(lo_color, hi_color, local);
+  if (color.a > 0.0) {
+    color.rgb /= color.a;
+  } else {
+    color = float4(0.0);
+  }
+  if (background.color_space == 1) {
+    // Oklab
+    color = oklab_to_srgb(color);
+  }
+  return dither_gradient(color, position);
+}
+
+// Triangular noise reduces banding; perturb only fractional alpha to preserve exact
+// transparent and opaque coverage.
+float4 dither_gradient(float4 color, float2 position) {
+  float2 seed = position * 0.6180339887;
+  float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
+  float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
+  float tri = r1 + r2 - 1.0;
+  color.rgb += tri * 2.0 / 255.0;
+  if (color.a > 0.0 && color.a < 1.0) {
+    color.a = clamp(color.a + tri * 3.0 / 255.0, 0.0, 1.0);
+  }
+  return color;
 }
 
 float2x2 rotate2d(float angle) {
@@ -1177,15 +1193,15 @@ float2x2 rotate2d(float angle) {
     return float2x2(c, -s, s, c);
 }
 
-float4 fill_color(Background background,
+float4 fill_color(GpuBackground background,
                       float2 position,
                       Bounds_ScaledPixels bounds,
-                      float4 solid_color, float4 color0, float4 color1) {
+                      constant LinearColorStop *gradient_stops) {
   float4 color;
 
   switch (background.tag) {
     case 0:
-      color = solid_color;
+      color = hsla_to_rgba(background.solid);
       break;
     case 1: {
       // -90 degrees to match the CSS gradient angle.
@@ -1200,7 +1216,7 @@ float4 fill_color(Background background,
           direction.x *=  bounds.size.width / bounds.size.height;
       }
 
-      // Get the t value for the linear gradient with the color stop percentages.
+      // Get the t value for the linear gradient along its line.
       float2 half_size = float2(bounds.size.width, bounds.size.height) / 2.;
       float2 center = float2(bounds.origin.x, bounds.origin.y) + half_size;
       float2 center_to_point = position - center;
@@ -1212,36 +1228,36 @@ float4 fill_color(Background background,
           t = (t + half_size.y) / bounds.size.height;
       }
 
-      // Adjust t based on the stop percentages
-      t = (t - background.colors[0].percentage)
-        / (background.colors[1].percentage
-        - background.colors[0].percentage);
-      t = clamp(t, 0.0, 1.0);
-
-      switch (background.color_space) {
-        case 0:
-          color = mix(color0, color1, t);
-          break;
-        case 1: {
-          float4 oklab_color = mix(color0, color1, t);
-          color = oklab_to_srgb(oklab_color);
-          break;
-        }
+      color = sample_gradient_stops(background, t, position, gradient_stops);
+      break;
+    }
+    case 4: {
+      // Elliptical radial gradient from the normalized center to its radii.
+      float2 center = float2(bounds.origin.x, bounds.origin.y)
+        + float2(background.center_x, background.center_y)
+        * float2(bounds.size.width, bounds.size.height);
+      float2 radii = max(
+        float2(background.radius_x, background.radius_y)
+          * float2(bounds.size.width, bounds.size.height),
+        float2(0.0001));
+      float t = length((position - center) / radii);
+      color = sample_gradient_stops(background, t, position, gradient_stops);
+      break;
+    }
+    case 5: {
+      // Clockwise conic gradient from the normalized center and 0-up start angle.
+      float2 center = float2(bounds.origin.x, bounds.origin.y)
+        + float2(background.center_x, background.center_y)
+        * float2(bounds.size.width, bounds.size.height);
+      float2 v = position - center;
+      float start = background.gradient_angle_or_pattern_height * (M_PI_F / 180.0);
+      // +pi/2 maps 0 to up in y-down coordinates. Do not negate v: negative zero flips
+      // fast-math atan2 on the center row. Pin the origin because atan2(0,0) may be NaN.
+      float t = 0.0;
+      if (any(v != 0.0)) {
+        t = fract((atan2(v.y, v.x) + M_PI_F / 2.0 - start) / (2.0 * M_PI_F));
       }
-
-      // Dither to reduce banding in gradients (especially dark/alpha).
-      // Triangular-distributed noise breaks up 8-bit quantization steps.
-      // ±2/255 for RGB (enough for dark-on-dark compositing),
-      // ±3/255 for alpha (needs more because alpha × dark color = tiny steps).
-      {
-        float2 seed = position * 0.6180339887; // golden ratio spread
-        float r1 = fract(sin(dot(seed, float2(12.9898, 78.233))) * 43758.5453);
-        float r2 = fract(sin(dot(seed, float2(39.3460, 11.135))) * 24634.6345);
-        float tri = r1 + r2 - 1.0; // triangular PDF, range [-1, +1]
-        color.rgb += tri * 2.0 / 255.0;
-        color.a   += tri * 3.0 / 255.0;
-      }
-
+      color = sample_gradient_stops(background, t, position, gradient_stops);
       break;
     }
     case 2: {
@@ -1256,7 +1272,7 @@ float4 fill_color(Background background,
         float2 rotated_point = rotation * relative_position;
         float pattern = fmod(rotated_point.x, pattern_period);
         float distance = min(pattern, pattern_period - pattern) - pattern_period * (pattern_width / pattern_height) /  2.0f;
-        color = solid_color;
+        color = hsla_to_rgba(background.solid);
         color.a *= saturate(0.5 - distance);
         break;
     }
@@ -1269,7 +1285,7 @@ float4 fill_color(Background background,
         float y_index = floor(relative_position.y / size);
         float should_be_colored = fmod(x_index + y_index, 2.0);
 
-        color = solid_color;
+        color = hsla_to_rgba(background.solid);
         color.a *= saturate(should_be_colored);
         break;
     }

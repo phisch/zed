@@ -4948,7 +4948,7 @@ impl EditorElement {
 
                 let mut paint_highlight = |highlight_row_start: DisplayRow,
                                            highlight_row_end: DisplayRow,
-                                           highlight: crate::LineHighlight,
+                                           highlight: &crate::LineHighlight,
                                            edges| {
                     let mut origin_x = layout.hitbox.left();
                     let mut width = layout.hitbox.size.width;
@@ -4970,7 +4970,7 @@ impl EditorElement {
                         layout.position_map.line_height
                             * highlight_row_end.next_row().minus(highlight_row_start) as f32,
                     );
-                    let mut quad = fill(Bounds { origin, size }, highlight.background);
+                    let mut quad = fill(Bounds { origin, size }, highlight.background.clone());
                     if let Some(border_color) = highlight.border {
                         quad.border_color = border_color;
                         quad.border_widths = edges
@@ -4980,10 +4980,10 @@ impl EditorElement {
 
                 let mut current_paint: Option<(LineHighlight, Range<DisplayRow>, Edges<Pixels>)> =
                     None;
-                for (&new_row, &new_background) in &layout.highlighted_rows {
+                for (&new_row, new_background) in &layout.highlighted_rows {
                     match &mut current_paint {
-                        &mut Some((current_background, ref mut current_range, mut edges)) => {
-                            let new_range_started = current_background != new_background
+                        Some((current_background, current_range, edges)) => {
+                            let new_range_started = *current_background != *new_background
                                 || current_range.end.next_row() != new_row;
                             if new_range_started {
                                 if current_range.end.next_row() == new_row {
@@ -4993,7 +4993,7 @@ impl EditorElement {
                                     current_range.start,
                                     current_range.end,
                                     current_background,
-                                    edges,
+                                    *edges,
                                 );
                                 let edges = Edges {
                                     top: if current_range.end.next_row() != new_row {
@@ -5004,7 +5004,8 @@ impl EditorElement {
                                     bottom: px(1.),
                                     ..Default::default()
                                 };
-                                current_paint = Some((new_background, new_row..new_row, edges));
+                                current_paint =
+                                    Some((new_background.clone(), new_row..new_row, edges));
                                 continue;
                             } else {
                                 current_range.end = current_range.end.next_row();
@@ -5016,12 +5017,12 @@ impl EditorElement {
                                 bottom: px(1.),
                                 ..Default::default()
                             };
-                            current_paint = Some((new_background, new_row..new_row, edges))
+                            current_paint = Some((new_background.clone(), new_row..new_row, edges))
                         }
                     };
                 }
                 if let Some((color, range, edges)) = current_paint {
-                    paint_highlight(range.start, range.end, color, edges);
+                    paint_highlight(range.start, range.end, &color, edges);
                 }
 
                 for (guide_x, active) in layout.wrap_guides.iter() {
@@ -8274,7 +8275,7 @@ impl Element for EditorElement {
                         for row_num in start_row..=end_row {
                             highlighted_rows
                                 .entry(DisplayRow(row_num))
-                                .or_insert(drag_highlight);
+                                .or_insert_with(|| drag_highlight.clone());
                         }
                     }
 

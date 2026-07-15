@@ -5,8 +5,9 @@ use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
 
 use crate::{
-    AtlasTextureId, AtlasTile, Background, Bounds, ContentMask, Corners, Edges, Hsla, Pixels,
-    Point, Radians, ScaledPixels, Size, bounds_tree::BoundsTree, point,
+    AtlasTextureId, AtlasTile, Background, BackgroundTag, Bounds, ColorSpace, ContentMask, Corners,
+    Edges, Hsla, LinearColorStop, Pixels, Point, Radians, ScaledPixels, Size,
+    bounds_tree::BoundsTree, point,
 };
 use std::{
     fmt::Debug,
@@ -50,6 +51,8 @@ pub struct Scene {
     pub subpixel_sprites: Vec<SubpixelSprite>,
     pub polychrome_sprites: Vec<PolychromeSprite>,
     pub surfaces: Vec<PaintSurface>,
+    /// Frame-wide color stops indexed by [`GpuBackground`] offset and count.
+    gradient_stops: Vec<LinearColorStop>,
 }
 
 #[expect(missing_docs)]
@@ -66,6 +69,66 @@ impl Scene {
         self.subpixel_sprites.clear();
         self.polychrome_sprites.clear();
         self.surfaces.clear();
+        self.gradient_stops.clear();
+    }
+
+    pub fn gradient_stops(&self) -> &[LinearColorStop] {
+        &self.gradient_stops
+    }
+
+    pub(crate) fn pack_background(
+        &mut self,
+        background: &Background,
+        opacity: f32,
+    ) -> GpuBackground {
+        let stops = if background.tag.is_gradient() {
+            background.stops()
+        } else {
+            &[]
+        };
+        let (stop_offset, stop_count) = if stops.is_empty() {
+            (0, 0)
+        } else {
+            let offset = self.gradient_stops.len() as u32;
+            self.gradient_stops
+                .extend(stops.iter().map(|stop| stop.opacity(opacity)));
+            (offset, stops.len() as u32)
+        };
+        GpuBackground {
+            tag: background.tag,
+            color_space: background.color_space,
+            solid: background.solid.opacity(opacity),
+            gradient_angle_or_pattern_height: background.gradient_angle_or_pattern_height,
+            stop_offset,
+            stop_count,
+            center_x: background.center_x,
+            center_y: background.center_y,
+            radius_x: background.radius_x,
+            radius_y: background.radius_y,
+            pad: 0,
+        }
+    }
+
+    fn import_gradient_stops(
+        &mut self,
+        mut background: GpuBackground,
+        prev_scene: &Scene,
+    ) -> GpuBackground {
+        if background.stop_count > 0 {
+            let start = background.stop_offset as usize;
+            let stops = prev_scene
+                .gradient_stops
+                .get(start..)
+                .and_then(|stops| stops.get(..background.stop_count as usize));
+            if let Some(stops) = stops {
+                background.stop_offset = self.gradient_stops.len() as u32;
+                self.gradient_stops.extend_from_slice(stops);
+            } else {
+                debug_assert!(false, "gradient stop range out of bounds during replay");
+                background.stop_count = 0;
+            }
+        }
+        background
     }
 
     pub fn len(&self) -> usize {
@@ -141,7 +204,27 @@ impl Scene {
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
-                PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
+                PaintOperation::Primitive(primitive) => {
+                    let mut primitive = primitive.clone();
+                    if primitive
+                        .bounds()
+                        .intersect(&primitive.content_mask().bounds)
+                        .is_empty()
+                    {
+                        continue;
+                    }
+                    match &mut primitive {
+                        Primitive::Quad(quad) => {
+                            quad.background =
+                                self.import_gradient_stops(quad.background, prev_scene);
+                        }
+                        Primitive::Path(path) => {
+                            path.color = self.import_gradient_stops(path.color, prev_scene);
+                        }
+                        _ => {}
+                    }
+                    self.insert_primitive(primitive)
+                }
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
             }
@@ -495,6 +578,32 @@ pub enum PrimitiveBatch {
     Surfaces(Range<usize>),
 }
 
+/// A [`Background`] flattened for the GPU, with stops referenced by offset and count.
+#[derive(Default, Debug, Copy, Clone, PartialEq)]
+#[repr(C)]
+pub struct GpuBackground {
+    pub(crate) tag: BackgroundTag,
+    pub(crate) color_space: ColorSpace,
+    pub(crate) solid: Hsla,
+    pub(crate) gradient_angle_or_pattern_height: f32,
+    /// Index of the gradient's first stop in the scene's stop buffer.
+    pub(crate) stop_offset: u32,
+    /// Number of stops, zero for non-gradient backgrounds.
+    pub(crate) stop_count: u32,
+    pub(crate) center_x: f32,
+    pub(crate) center_y: f32,
+    pub(crate) radius_x: f32,
+    pub(crate) radius_y: f32,
+    /// Padding for the 8-byte size multiple the wgsl mirror needs.
+    pub(crate) pad: u32,
+}
+
+// WGSL vec2 alignment rounds array strides to multiples of 8. These assertions prevent
+// Rust and WGSL array elements after the first from diverging.
+const _: () = assert!(std::mem::size_of::<LinearColorStop>() == 20);
+const _: () = assert!(std::mem::size_of::<GpuBackground>() == 56);
+const _: () = assert!(std::mem::size_of::<Quad>() == 144);
+
 #[derive(Default, Debug, Copy, Clone)]
 #[repr(C)]
 #[expect(missing_docs)]
@@ -503,7 +612,7 @@ pub struct Quad {
     pub border_style: BorderStyle,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
-    pub background: Background,
+    pub background: GpuBackground,
     pub border_color: Hsla,
     pub corner_radii: Corners<ScaledPixels>,
     pub border_widths: Edges<ScaledPixels>,
@@ -758,7 +867,7 @@ pub struct Path<P: Clone + Debug + Default + PartialEq> {
     pub bounds: Bounds<P>,
     pub content_mask: ContentMask<P>,
     pub vertices: Vec<PathVertex<P>>,
-    pub color: Background,
+    pub color: GpuBackground,
     start: Point<P>,
     current: Point<P>,
     contour_count: usize,
@@ -911,5 +1020,44 @@ impl PathVertex<Pixels> {
             st_position: self.st_position,
             content_mask: self.content_mask.scale(factor),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{linear_color_stop, linear_gradient_stops, rgba};
+
+    #[test]
+    fn test_gradient_stop_packing_and_clipped_replay() {
+        let mut previous_scene = Scene::default();
+        let background = linear_gradient_stops(
+            0.0,
+            [
+                linear_color_stop(rgba(0xff000080), 0.0),
+                linear_color_stop(rgba(0x0000ffff), 1.0),
+            ],
+        );
+        let packed = previous_scene.pack_background(&background, 0.5);
+        assert_eq!((packed.stop_offset, packed.stop_count), (0, 2));
+        assert_eq!(
+            previous_scene.gradient_stops(),
+            background.opacity(0.5).stops()
+        );
+
+        previous_scene
+            .paint_operations
+            .push(PaintOperation::Primitive(
+                Quad {
+                    background: packed,
+                    ..Default::default()
+                }
+                .into(),
+            ));
+
+        let mut scene = Scene::default();
+        scene.replay(0..1, &previous_scene);
+        assert!(scene.gradient_stops().is_empty());
+        assert!(scene.quads.is_empty());
     }
 }

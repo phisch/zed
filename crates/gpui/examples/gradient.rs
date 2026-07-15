@@ -21,6 +21,12 @@ impl GradientViewer {
 impl Render for GradientViewer {
     fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let color_space = self.color_space;
+        let gradient = |background: gpui::Background| {
+            div()
+                .flex_1()
+                .rounded_xl()
+                .bg(background.color_space(color_space))
+        };
 
         div()
             .bg(gpui::white())
@@ -205,6 +211,63 @@ impl Render for GradientViewer {
                         )
                         .color_space(color_space)),
                     ),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_1()
+                    .gap_3()
+                    .child(gradient(gpui::linear_gradient_stops(
+                        90.,
+                        [
+                            linear_color_stop(gpui::red(), 0.),
+                            linear_color_stop(gpui::yellow(), 0.25),
+                            linear_color_stop(gpui::green(), 0.5),
+                            linear_color_stop(gpui::blue(), 0.75),
+                            linear_color_stop(gpui::red(), 1.),
+                        ],
+                    )))
+                    .child(gradient(gpui::radial_gradient(
+                        point(0.5, 0.5),
+                        size(0.5, 0.5),
+                        [
+                            linear_color_stop(gpui::yellow(), 0.),
+                            linear_color_stop(gpui::red(), 0.6),
+                            linear_color_stop(gpui::blue(), 1.),
+                        ],
+                    )))
+                    .child(gradient(gpui::conic_gradient(
+                        point(0.5, 0.5),
+                        0.,
+                        [
+                            linear_color_stop(gpui::red(), 0.),
+                            linear_color_stop(gpui::yellow(), 1. / 6.),
+                            linear_color_stop(gpui::green(), 2. / 6.),
+                            linear_color_stop(gpui::rgb(0x00ffff), 3. / 6.),
+                            linear_color_stop(gpui::blue(), 4. / 6.),
+                            linear_color_stop(gpui::rgb(0xff00ff), 5. / 6.),
+                            linear_color_stop(gpui::red(), 1.),
+                        ],
+                    ))),
+            )
+            .child(
+                // Two full hue cycles from 13 stops.
+                gradient(gpui::linear_gradient_stops(
+                    90.,
+                    (0..=12).map(|index| {
+                        linear_color_stop(
+                            match index % 6 {
+                                0 => gpui::red(),
+                                1 => gpui::yellow(),
+                                2 => gpui::green(),
+                                3 => gpui::rgb(0x00ffff).into(),
+                                4 => gpui::blue(),
+                                _ => gpui::rgb(0xff00ff).into(),
+                            },
+                            index as f32 / 12.,
+                        )
+                    }),
+                )),
             )
             .child(div().h_24().child(canvas(
                 move |_, _, _| {},

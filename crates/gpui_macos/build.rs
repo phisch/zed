@@ -42,6 +42,8 @@ mod macos_build {
             "Pixels".into(),
             "PointF".into(),
             "Hsla".into(),
+            "LinearColorStop".into(),
+            "GpuBackground".into(),
             "ContentMask".into(),
             "Uniforms".into(),
             "AtlasTile".into(),

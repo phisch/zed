@@ -93,6 +93,8 @@ struct GammaParams {
 
 @group(0) @binding(0) var<uniform> globals: GlobalParams;
 @group(0) @binding(1) var<uniform> gamma_params: GammaParams;
+// Color stops for the frame, indexed by each background's offset and count.
+@group(0) @binding(2) var<storage, read> b_gradient_stops: array<LinearColorStop>;
 @group(1) @binding(1) var t_sprite: texture_2d<f32>;
 @group(1) @binding(2) var s_sprite: sampler;
 
@@ -130,18 +132,23 @@ struct LinearColorStop {
     percentage: f32,
 }
 
-struct Background {
-    // 0u is Solid
-    // 1u is LinearGradient
-    // 2u is PatternSlash
-    // 3u is Checkerboard
+struct GpuBackground {
+    // tag: 0 solid, 1 linear, 2 slash, 3 checkerboard, 4 radial, 5 conic.
     tag: u32,
-    // 0u is sRGB linear color
-    // 1u is Oklab color
+    // color_space: 0 gamma-encoded sRGB, 1 Oklab.
     color_space: u32,
     solid: Hsla,
+    // Angle in degrees, or packed pattern dimensions.
     gradient_angle_or_pattern_height: f32,
-    colors: array<LinearColorStop, 2>,
+    // Stop range in the frame's gradient-stop buffer.
+    stop_offset: u32,
+    stop_count: u32,
+    // Normalized center; radial radii are fractions of the bounds.
+    center_x: f32,
+    center_y: f32,
+    radius_x: f32,
+    radius_y: f32,
+    // Padding preserves the 56-byte Rust GPU layout.
     pad: u32,
 }
 
@@ -206,26 +213,19 @@ fn distance_from_clip_rect_transformed(unit_vertex: vec2<f32>, bounds: Bounds, c
     return distance_from_clip_rect_impl(transformed, clip_bounds);
 }
 
-// https://gamedev.stackexchange.com/questions/92015/optimized-linear-to-srgb-glsl
+// Extended-range sRGB transfer functions preserve the sign of out-of-gamut values.
 fn srgb_to_linear(srgb: vec3<f32>) -> vec3<f32> {
-    let cutoff = srgb < vec3<f32>(0.04045);
-    let higher = pow((srgb + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
-    let lower = srgb / vec3<f32>(12.92);
-    return select(higher, lower, cutoff);
-}
-
-fn srgb_to_linear_component(a: f32) -> f32 {
-    let cutoff = a < 0.04045;
-    let higher = pow((a + 0.055) / 1.055, 2.4);
-    let lower = a / 12.92;
-    return select(higher, lower, cutoff);
+    let magnitude = abs(srgb);
+    let higher = pow((magnitude + vec3<f32>(0.055)) / vec3<f32>(1.055), vec3<f32>(2.4));
+    let lower = magnitude / vec3<f32>(12.92);
+    return sign(srgb) * select(lower, higher, magnitude > vec3<f32>(0.04045));
 }
 
 fn linear_to_srgb(linear: vec3<f32>) -> vec3<f32> {
-    let cutoff = linear < vec3<f32>(0.0031308);
-    let higher = vec3<f32>(1.055) * pow(linear, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
-    let lower = linear * vec3<f32>(12.92);
-    return select(higher, lower, cutoff);
+    let magnitude = abs(linear);
+    let higher = vec3<f32>(1.055) * pow(magnitude, vec3<f32>(1.0 / 2.4)) - vec3<f32>(0.055);
+    let lower = magnitude * vec3<f32>(12.92);
+    return sign(linear) * select(lower, higher, magnitude > vec3<f32>(0.0031308));
 }
 
 /// Convert a linear color to sRGBA space.
@@ -238,7 +238,9 @@ fn srgba_to_linear(color: vec4<f32>) -> vec4<f32> {
     return vec4<f32>(srgb_to_linear(color.rgb), color.a);
 }
 
-/// Hsla to linear RGBA conversion.
+/// Hsla to RGBA conversion. HSL is defined over gamma-encoded sRGB, so this yields
+/// gamma-encoded components, the space this pipeline renders in (the surface is a
+/// non-sRGB format, values are displayed as written).
 fn hsla_to_rgba(hsla: Hsla) -> vec4<f32> {
     let h = hsla.h * 6.0; // Now, it's an angle but scaled in [0, 6) range
     let s = hsla.s;
@@ -394,47 +396,80 @@ fn blend_color(color: vec4<f32>, alpha_factor: f32) -> vec4<f32> {
     return vec4<f32>(color.rgb * multiplier, alpha);
 }
 
-
-struct GradientColor {
-    solid: vec4<f32>,
-    color0: vec4<f32>,
-    color1: vec4<f32>,
-}
-
-fn prepare_gradient_color(tag: u32, color_space: u32,
-    solid: Hsla, colors: array<LinearColorStop, 2>) -> GradientColor {
-    var result = GradientColor();
-
-    if (tag == 0u || tag == 2u || tag == 3u) {
-        result.solid = hsla_to_rgba(solid);
-    } else if (tag == 1u) {
-        // The hsla_to_rgba is returns a linear sRGB color
-        result.color0 = hsla_to_rgba(colors[0].color);
-        result.color1 = hsla_to_rgba(colors[1].color);
-
-        // Prepare color space in vertex for avoid conversion
-        // in fragment shader for performance reasons
-        if (color_space == 0u) {
-            // sRGB
-            result.color0 = linear_to_srgba(result.color0);
-            result.color1 = linear_to_srgba(result.color1);
-        } else if (color_space == 1u) {
-            // Oklab
-            result.color0 = linear_srgb_to_oklab(result.color0);
-            result.color1 = linear_srgb_to_oklab(result.color1);
-        }
+// Convert gamma-encoded sRGB output into the requested interpolation space.
+fn gradient_stop_in_space(color: Hsla, color_space: u32) -> vec4<f32> {
+    // hsla_to_rgba yields gamma-encoded sRGB, the space this pipeline renders in.
+    let rgba = hsla_to_rgba(color);
+    if (color_space == 1u) {
+        // Oklab interpolates in linear light: decode, then convert.
+        return linear_srgb_to_oklab(srgba_to_linear(rgba));
     }
-
-    return result;
+    // sRGB interpolates the gamma components directly, like CSS.
+    return rgba;
 }
 
-fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
-    solid_color: vec4<f32>, color0: vec4<f32>, color1: vec4<f32>) -> vec4<f32> {
+// Triangular noise reduces banding; perturb only fractional alpha to preserve exact
+// transparent and opaque coverage.
+fn dither_gradient(color: vec4<f32>, position: vec2<f32>) -> vec4<f32> {
+    let seed = position * 0.6180339887;
+    let r1 = fract(sin(dot(seed, vec2<f32>(12.9898, 78.233))) * 43758.5453);
+    let r2 = fract(sin(dot(seed, vec2<f32>(39.3460, 11.135))) * 24634.6345);
+    let tri = r1 + r2 - 1.0;
+    var alpha = color.a;
+    if (alpha > 0.0 && alpha < 1.0) {
+        alpha = clamp(alpha + tri * 3.0 / 255.0, 0.0, 1.0);
+    }
+    return vec4<f32>(color.rgb + tri * 2.0 / 255.0, alpha);
+}
+
+// Sample CSS stops with premultiplied alpha; endpoint colors extend beyond their stops.
+// Returns a dithered gamma-encoded sRGB color.
+fn sample_gradient_stops(background: GpuBackground, t: f32, position: vec2<f32>) -> vec4<f32> {
+    if (background.stop_count == 0u) {
+        return vec4<f32>(0.0);
+    }
+    let first = background.stop_offset;
+    let last = background.stop_offset + background.stop_count - 1u;
+    var lo = b_gradient_stops[first];
+    var hi = b_gradient_stops[last];
+    var local = 0.0;
+    if (t <= lo.percentage) {
+        hi = lo;
+    } else if (t >= hi.percentage) {
+        lo = hi;
+    } else {
+        for (var i = first + 1u; i <= last; i += 1u) {
+            if (t <= b_gradient_stops[i].percentage) {
+                lo = b_gradient_stops[i - 1u];
+                hi = b_gradient_stops[i];
+                break;
+            }
+        }
+        local = clamp((t - lo.percentage) / (hi.percentage - lo.percentage), 0.0, 1.0);
+    }
+    var lo_color = gradient_stop_in_space(lo.color, background.color_space);
+    var hi_color = gradient_stop_in_space(hi.color, background.color_space);
+    lo_color = vec4<f32>(lo_color.rgb * lo_color.a, lo_color.a);
+    hi_color = vec4<f32>(hi_color.rgb * hi_color.a, hi_color.a);
+    var color = mix(lo_color, hi_color, local);
+    if (color.a > 0.0) {
+        color = vec4<f32>(color.rgb / color.a, color.a);
+    } else {
+        color = vec4<f32>(0.0);
+    }
+    if (background.color_space == 1u) {
+        // Oklab: back to linear light, then encode for the gamma pipeline.
+        color = linear_to_srgba(oklab_to_linear_srgb(color));
+    }
+    return dither_gradient(color, position);
+}
+
+fn gradient_color(background: GpuBackground, position: vec2<f32>, bounds: Bounds) -> vec4<f32> {
     var background_color = vec4<f32>(0.0);
 
     switch (background.tag) {
         default: {
-            return solid_color;
+            return hsla_to_rgba(background.solid);
         }
         case 1u: {
             // Linear gradient background.
@@ -442,8 +477,6 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             let angle = background.gradient_angle_or_pattern_height;
             let radians = (angle % 360.0 - 90.0) * M_PI_F / 180.0;
             var direction = vec2<f32>(cos(radians), sin(radians));
-            let stop0_percentage = background.colors[0].percentage;
-            let stop1_percentage = background.colors[1].percentage;
 
             // Expand the short side to be the same as the long side
             if (bounds.size.x > bounds.size.y) {
@@ -452,7 +485,7 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
                 direction.x *= bounds.size.x / bounds.size.y;
             }
 
-            // Get the t value for the linear gradient with the color stop percentages.
+            // Get the t value for the linear gradient along its line.
             let half_size = bounds.size / 2.0;
             let center = bounds.origin + half_size;
             let center_to_point = position - center;
@@ -464,19 +497,32 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
                 t = (t + half_size.y) / bounds.size.y;
             }
 
-            // Adjust t based on the stop percentages
-            t = (t - stop0_percentage) / (stop1_percentage - stop0_percentage);
-            t = clamp(t, 0.0, 1.0);
-
-            switch (background.color_space) {
-                default: {
-                    background_color = srgba_to_linear(mix(color0, color1, t));
-                }
-                case 1u: {
-                    let oklab_color = mix(color0, color1, t);
-                    background_color = oklab_to_linear_srgb(oklab_color);
-                }
+            background_color = sample_gradient_stops(background, t, position);
+        }
+        case 4u: {
+            // Elliptical radial gradient from the normalized center to its radii.
+            let center = bounds.origin
+                + vec2<f32>(background.center_x, background.center_y) * bounds.size;
+            let radii = max(
+                vec2<f32>(background.radius_x, background.radius_y) * bounds.size,
+                vec2<f32>(0.0001),
+            );
+            let t = length((position - center) / radii);
+            background_color = sample_gradient_stops(background, t, position);
+        }
+        case 5u: {
+            // Clockwise conic gradient from the normalized center and 0-up start angle.
+            let center = bounds.origin
+                + vec2<f32>(background.center_x, background.center_y) * bounds.size;
+            let v = position - center;
+            let start = background.gradient_angle_or_pattern_height * M_PI_F / 180.0;
+            // +pi/2 maps 0 to up in y-down coordinates. Do not negate v: negative zero
+            // flips fast-math atan2 on the center row. Pin the origin because atan2(0,0) may be NaN.
+            var t = 0.0;
+            if (any(v != vec2<f32>(0.0))) {
+                t = fract((atan2(v.y, v.x) + M_PI_F / 2.0 - start) / (2.0 * M_PI_F));
             }
+            background_color = sample_gradient_stops(background, t, position);
         }
         case 2u: {
             // pattern slash
@@ -494,7 +540,7 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             let rotated_point = rotation * relative_position;
             let pattern = rotated_point.x % pattern_period;
             let distance = min(pattern, pattern_period - pattern) - pattern_period * (pattern_width / pattern_height) /  2.0f;
-            background_color = solid_color;
+            background_color = hsla_to_rgba(background.solid);
             background_color.a *= saturate(0.5 - distance);
         }
         case 3u: {
@@ -506,7 +552,7 @@ fn gradient_color(background: Background, position: vec2<f32>, bounds: Bounds,
             let y_index = floor(relative_position.y / size);
             let should_be_colored = (x_index + y_index) % 2.0;
 
-            background_color = solid_color;
+            background_color = hsla_to_rgba(background.solid);
             background_color.a *= saturate(should_be_colored);
         }
     }
@@ -521,7 +567,7 @@ struct Quad {
     border_style: u32,
     bounds: Bounds,
     content_mask: Bounds,
-    background: Background,
+    background: GpuBackground,
     border_color: Hsla,
     corner_radii: Corners,
     border_widths: Edges,
@@ -534,9 +580,6 @@ struct QuadVarying {
     @location(1) @interpolate(flat) quad_id: u32,
     // TODO: use `clip_distance` once Naga supports it
     @location(2) clip_distances: vec4<f32>,
-    @location(3) @interpolate(flat) background_solid: vec4<f32>,
-    @location(4) @interpolate(flat) background_color0: vec4<f32>,
-    @location(5) @interpolate(flat) background_color1: vec4<f32>,
 }
 
 @vertex
@@ -546,16 +589,6 @@ fn vs_quad(@builtin(vertex_index) vertex_id: u32, @builtin(instance_index) insta
 
     var out = QuadVarying();
     out.position = to_device_position(unit_vertex, quad.bounds);
-
-    let gradient = prepare_gradient_color(
-        quad.background.tag,
-        quad.background.color_space,
-        quad.background.solid,
-        quad.background.colors
-    );
-    out.background_solid = gradient.solid;
-    out.background_color0 = gradient.color0;
-    out.background_color1 = gradient.color1;
     out.border_color = hsla_to_rgba(quad.border_color);
     out.quad_id = instance_id;
     out.clip_distances = distance_from_clip_rect(unit_vertex, quad.bounds, quad.content_mask);
@@ -571,8 +604,7 @@ fn fs_quad(input: QuadVarying) -> @location(0) vec4<f32> {
 
     let quad = b_quads[input.quad_id];
 
-    let background_color = gradient_color(quad.background, input.position.xy, quad.bounds,
-        input.background_solid, input.background_color0, input.background_color1);
+    let background_color = gradient_color(quad.background, input.position.xy, quad.bounds);
 
     let unrounded = quad.corner_radii.top_left == 0.0 &&
         quad.corner_radii.bottom_left == 0.0 &&
@@ -1052,7 +1084,7 @@ fn fs_shadow(input: ShadowVarying) -> @location(0) vec4<f32> {
 struct PathRasterizationVertex {
     xy_position: vec2<f32>,
     st_position: vec2<f32>,
-    color: Background,
+    color: GpuBackground,
     bounds: Bounds,
 }
 
@@ -1100,14 +1132,7 @@ fn fs_path_rasterization(input: PathRasterizationVarying) -> @location(0) vec4<f
         let distance = f / length(gradient);
         alpha = saturate(0.5 - distance);
     }
-    let prepared_gradient = prepare_gradient_color(
-        background.tag,
-        background.color_space,
-        background.solid,
-        background.colors,
-    );
-    let color = gradient_color(background, input.position.xy, bounds,
-        prepared_gradient.solid, prepared_gradient.color0, prepared_gradient.color1);
+    let color = gradient_color(background, input.position.xy, bounds);
     return vec4<f32>(color.rgb * color.a * alpha, color.a * alpha);
 }
 
