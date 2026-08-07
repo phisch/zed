@@ -132,7 +132,6 @@ pub struct WaylandWindowState {
     // will send a frame callback once the surface is visible.
     awaiting_frame_callback: bool,
     frame_in_progress: bool,
-    redraw_requested: bool,
     in_progress_configure: Option<InProgressConfigure>,
     resize_throttle: bool,
     in_progress_window_controls: Option<WindowControls>,
@@ -542,6 +541,13 @@ impl WaylandSurfaceState {
 pub struct WaylandWindowStatePtr {
     state: Rc<RefCell<WaylandWindowState>>,
     callbacks: Rc<RefCell<Callbacks>>,
+    /// A frame asked for while one was already being drawn.
+    ///
+    /// Outside the state because that is exactly when the state is borrowed:
+    /// `frame` drops its borrow before rendering and the renderer takes one
+    /// for the whole draw, so a request arriving then cannot reach into the
+    /// state to record itself.
+    redraw_requested: Rc<Cell<bool>>,
 }
 
 impl WaylandWindowState {
@@ -637,7 +643,6 @@ impl WaylandWindowState {
             renderer_presented: false,
             awaiting_frame_callback: false,
             frame_in_progress: false,
-            redraw_requested: false,
             in_progress_window_controls: None,
             window_controls: WindowControls::default(),
             client_inset: None,
@@ -797,6 +802,7 @@ impl WaylandWindow {
                 parent,
             )?)),
             callbacks: Rc::new(RefCell::new(Callbacks::default())),
+            redraw_requested: Rc::new(Cell::new(false)),
         });
 
         // Kick things off
@@ -858,7 +864,7 @@ impl WaylandWindowStatePtr {
         let mut state = self.state.borrow_mut();
         state.awaiting_frame_callback = false;
         state.frame_in_progress = true;
-        state.redraw_requested = false;
+        self.redraw_requested.set(false);
         state.surface.frame(&state.globals.qh, state.surface.id());
         state.resize_throttle = false;
         let force_render = state.force_render_after_recovery;
@@ -886,20 +892,27 @@ impl WaylandWindowStatePtr {
             // Never commit on top of it, a bare commit racing Mesa's
             // attach+commit causes flickering (#54214).
             state.awaiting_frame_callback = true;
-        } else if state.redraw_requested || state.force_render_after_recovery {
+        } else if self.redraw_requested.get() || state.force_render_after_recovery {
             state.surface.commit();
             state.awaiting_frame_callback = true;
         }
         // Otherwise the frame loop parks, costing no wake-ups until
         // request_redraw arms the still pending frame request.
-        state.redraw_requested = false;
+        self.redraw_requested.set(false);
         state.renderer_presented = false;
     }
 
     pub fn request_redraw(&self) {
-        let mut state = self.state.borrow_mut();
+        // A borrow that fails means the renderer holds one, which means a
+        // frame is in flight: the same case as `frame_in_progress` below, and
+        // that frame arms the callback on its way out. Reaching for the state
+        // here panicked whenever an update cycle finished mid-draw.
+        let Ok(mut state) = self.state.try_borrow_mut() else {
+            self.redraw_requested.set(true);
+            return;
+        };
         if state.frame_in_progress {
-            state.redraw_requested = true;
+            self.redraw_requested.set(true);
         } else if !state.awaiting_frame_callback && state.acknowledged_first_configure {
             // Arm the frame callback requested by the last frame().
             state.surface.commit();
